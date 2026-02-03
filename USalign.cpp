@@ -2905,12 +2905,14 @@ int flexalign(string &xname, string &yname, const string &fname_super,
                             rmsd_ali=rmsd_ali_h;
                             n_ali=n_ali_h;
                             n_ali8=n_ali8_h;
+                            for (int hinge=0;hinge<tu_vec.size();hinge++)
+                                tu_vec[hinge].clear();
                             tu_vec.clear();
                             for (int hinge=0;hinge<tu_vec_h.size();hinge++)
                                 tu_vec.push_back(tu_vec_h[hinge]);
                             do_vec.clear();
                             for (int r=0;r<do_vec_h.size();r++)
-                                do_vec_h.push_back(do_vec[r]);
+                                do_vec.push_back(do_vec_h[r]);
                         }
                         else tu2t_u(tu_vec[0],t0,u0);
                         do_vec_h.clear();
