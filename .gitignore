@@ -5,6 +5,7 @@
 .*.sw*
 
 # binary executables
+addChainID
 cif2pdb
 TMalign
 TMalignc
@@ -24,4 +25,5 @@ pdbAtomName
 *.zip
 
 .idea
+.gitignore
 cmake-build-debug
