@@ -2989,7 +2989,7 @@ int flexalign(string &xname, string &yname, const string &fname_super,
                     double TM_ali, rmsd_ali; // TMscore and rmsd in standard_TMscore
                     int n_ali = 0;
                     int n_ali8 = 0;
-                    bool force_fast_opt = (getmin(xlen, ylen) > 1500) ? true : fast_opt;
+                    bool force_fast_opt = (getmin(xlen, ylen) > 2000) ? true : fast_opt;
                     vector<vector<double>> tu_vec;
                     vector<double> do_vec;
 
@@ -3996,7 +3996,7 @@ int main(int argc, char *argv[])
     {
         if (i_opt)
             PrintErrorAndQuit("-mm cannot be used with -i or -I");
-        if (u_opt)
+        if (u_opt && mm_opt < 7)
             PrintErrorAndQuit("-mm cannot be used with -u or -L");
         // if (cp_opt) PrintErrorAndQuit("-mm cannot be used with -cp");
         if (dir_opt.size() && (mm_opt == 1 || mm_opt == 2))
