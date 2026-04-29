@@ -3482,6 +3482,319 @@ int flexalign_best(string &xname, string &yname, const string &fname_super,
     return 0;
 }
 
+// Needleman-Wunsch 序列比对并补齐 Gap 生成全映射
+void get_full_mapping(const string& seq1, const string& seq2, vector<int>& map1, vector<int>& map2) {
+    int n = seq1.length();
+    int m = seq2.length();
+    int match = 2, mismatch = -1, gap = -1;
+    vector<vector<int>> score(n + 1, vector<int>(m + 1, 0));
+    
+    for (int i = 0; i <= n; i++) score[i][0] = gap * i;
+    for (int j = 0; j <= m; j++) score[0][j] = gap * j;
+
+    for (int i = 1; i <= n; i++) {
+        for (int j = 1; j <= m; j++) {
+            int diag = score[i-1][j-1] + (seq1[i-1] == seq2[j-1] ? match : mismatch);
+            int up = score[i-1][j] + gap;
+            int left = score[i][j-1] + gap;
+            score[i][j] = max({diag, up, left});
+        }
+    }
+
+    map<int, int> raw_map1, raw_map2;
+    int i = n, j = m;
+    while (i > 0 && j > 0) {
+        int current = score[i][j];
+        int diag = score[i-1][j-1] + (seq1[i-1] == seq2[j-1] ? match : mismatch);
+        int left = score[i][j-1] + gap;
+        
+        if (current == diag) {
+            raw_map1[i-1] = j-1;
+            raw_map2[j-1] = i-1;
+            i--; j--;
+        } else if (current == left) {
+            j--;
+        } else {
+            i--;
+        }
+    }
+
+    // 填补 Gap：向左右寻找最近的已比对位点
+    map1.assign(n, 0);
+    for (int i = 0; i < n; i++) {
+        if (raw_map1.count(i)) map1[i] = raw_map1[i];
+        else {
+            int left = i - 1, right = i + 1;
+            while (left >= 0 && !raw_map1.count(left)) left--;
+            while (right < n && !raw_map1.count(right)) right++;
+            if (left >= 0 && right < n) map1[i] = (i - left) <= (right - i) ? raw_map1[left] : raw_map1[right];
+            else if (left >= 0) map1[i] = raw_map1[left];
+            else if (right < n) map1[i] = raw_map1[right];
+        }
+    }
+
+    map2.assign(m, 0);
+    for (int i = 0; i < m; i++) {
+        if (raw_map2.count(i)) map2[i] = raw_map2[i];
+        else {
+            int left = i - 1, right = i + 1;
+            while (left >= 0 && !raw_map2.count(left)) left--;
+            while (right < m && !raw_map2.count(right)) right++;
+            if (left >= 0 && right < m) map2[i] = (i - left) <= (right - i) ? raw_map2[left] : raw_map2[right];
+            else if (left >= 0) map2[i] = raw_map2[left];
+            else if (right < m) map2[i] = raw_map2[right];
+        }
+    }
+}
+
+// 缓存单次切片的最佳结果结构体
+struct BisectRes {
+    int start1, end1, start2, end2;
+    double TM_u, avg_TM;
+    string seqxA, seqyA, seqM;
+    vector<vector<double>> tu_vec;
+    int L_ali;
+    double Liden, TM_ali, rmsd_ali;
+};
+
+void recursive_bisection(
+    double **xa_full, double **ya_full, const string& seqx_full, const string& seqy_full, 
+    const string& secx_full, const string& secy_full,
+    int start1, int end1, int start2, int end2,
+    const vector<int>& map1, const vector<int>& map2,
+    double Lnorm_ass, double tm_threshold, int min_length,
+    int mol_type, int hinge_opt, int i_opt, int a_opt, bool u_opt, bool d_opt, 
+    double d0_scale, bool fast_opt, vector<string>& sequence, 
+    vector<BisectRes>& results
+) {
+    int len1 = end1 - start1 + 1;
+    int len2 = end2 - start2 + 1;
+    int shorter_len = min(len1, len2);
+
+    // 1. 内存切片构造
+    double **xa, **ya;
+    char *seqx = new char[len1 + 1];
+    char *secx = new char[len1 + 1];
+    char *seqy = new char[len2 + 1];
+    char *secy = new char[len2 + 1];
+    NewArray(&xa, len1, 3);
+    NewArray(&ya, len2, 3);
+
+    for (int i = 0; i < len1; i++) {
+        xa[i][0] = xa_full[start1 + i][0]; xa[i][1] = xa_full[start1 + i][1]; xa[i][2] = xa_full[start1 + i][2];
+        seqx[i] = seqx_full[start1 + i]; secx[i] = secx_full[start1 + i];
+    }
+    for (int i = 0; i < len2; i++) {
+        ya[i][0] = ya_full[start2 + i][0]; ya[i][1] = ya_full[start2 + i][1]; ya[i][2] = ya_full[start2 + i][2];
+        seqy[i] = seqy_full[start2 + i]; secy[i] = secy_full[start2 + i];
+    }
+    seqx[len1] = '\0'; secx[len1] = '\0';
+    seqy[len2] = '\0'; secy[len2] = '\0';
+
+    // 2. 调用 flexalign_best 的核心评估逻辑 (ss_opt = 0 and 1)
+    double global_max_TM = -1.0;
+    BisectRes best_res;
+    best_res.start1 = start1; best_res.end1 = end1;
+    best_res.start2 = start2; best_res.end2 = end2;
+
+    for (int cur_ss_opt = 0; cur_ss_opt < 2; cur_ss_opt++) {
+        double t0[3], u0[3][3];
+        double TM1, TM2, TM3, TM4, TM5, d0_0, TM_0, d0A, d0B, d0u, d0a, d0_out = 5.0;
+        string seqM, seqxA, seqyA;
+        double rmsd0 = 0.0, Liden = 0, TM_ali, rmsd_ali;
+        int L_ali, n_ali = 0, n_ali8 = 0;
+        vector<vector<double>> tu_vec;
+        vector<double> do_vec;
+        
+        bool force_fast_opt = (min(len1, len2) > 1500) ? true : fast_opt;
+
+        flexalign_main(
+            xa, ya, seqx, seqy, secx, secy,
+            t0, u0, tu_vec, TM1, TM2, TM3, TM4, TM5,
+            d0_0, TM_0, d0A, d0B, d0u, d0a, d0_out,
+            seqM, seqxA, seqyA, do_vec,
+            rmsd0, L_ali, Liden, TM_ali, rmsd_ali, n_ali, n_ali8,
+            len1, len2, sequence, Lnorm_ass, d0_scale,
+            i_opt, a_opt, u_opt, d_opt, force_fast_opt, mol_type, hinge_opt, cur_ss_opt
+        );
+
+        double cur_avg_TM = (TM1 + TM2) / 2.0;
+        if (cur_avg_TM > global_max_TM) {
+            global_max_TM = cur_avg_TM;
+            best_res.avg_TM = cur_avg_TM;
+            best_res.TM_u = TM4; // TM4 承载基于 Lnorm_ass (user-specified) 的归一化分数
+            best_res.seqxA = seqxA; best_res.seqyA = seqyA; best_res.seqM = seqM;
+            best_res.L_ali = L_ali; best_res.Liden = Liden;
+            best_res.TM_ali = TM_ali; best_res.rmsd_ali = rmsd_ali;
+            
+            best_res.tu_vec.clear();
+            for(auto& t : tu_vec) best_res.tu_vec.push_back(t);
+        }
+    }
+
+    // 清理当前切片内存
+    delete[] seqx; delete[] secx; delete[] seqy; delete[] secy;
+    DeleteArray(&xa, len1); DeleteArray(&ya, len2);
+
+    // 3. 递归终止条件
+    if (best_res.avg_TM >= tm_threshold || shorter_len < min_length) {
+        results.push_back(best_res);
+        return;
+    }
+
+    // 4. 计算中点并二分
+    int mid1, mid2;
+    if (len1 <= len2) {
+        mid1 = start1 + len1 / 2 - 1;
+        mid2 = map1[mid1];
+        mid2 = max(start2, min(mid2, end2 - 1));
+    } else {
+        mid2 = start2 + len2 / 2 - 1;
+        mid1 = map2[mid2];
+        mid1 = max(start1, min(mid1, end1 - 1));
+    }
+
+    recursive_bisection(xa_full, ya_full, seqx_full, seqy_full, secx_full, secy_full,
+                        start1, mid1, start2, mid2, map1, map2, Lnorm_ass, tm_threshold, min_length,
+                        mol_type, hinge_opt, i_opt, a_opt, u_opt, d_opt, d0_scale, fast_opt, sequence, results);
+                        
+    recursive_bisection(xa_full, ya_full, seqx_full, seqy_full, secx_full, secy_full,
+                        mid1 + 1, end1, mid2 + 1, end2, map1, map2, Lnorm_ass, tm_threshold, min_length,
+                        mol_type, hinge_opt, i_opt, a_opt, u_opt, d_opt, d0_scale, fast_opt, sequence, results);
+}
+
+int flexalign_bisection(string &xname, string &yname, const string &fname_super,
+    const string &fname_lign, const string &fname_matrix,
+    vector<string> &sequence, double Lnorm_ass, const double d0_scale,
+    const bool m_opt, const int i_opt, const int o_opt, const int a_opt,
+    const bool u_opt, const bool d_opt, const double TMcut,
+    const int infmt1_opt, const int infmt2_opt, const int ter_opt,
+    const int split_opt, const int outfmt_opt, const bool fast_opt,
+    const int mirror_opt, const int het_opt, const string &atom_opt,
+    const bool autojustify, const string &mol_opt, const string &dir_opt,
+    const string &dirpair_opt, const string &dir1_opt, const string &dir2_opt,
+    const vector<string> &chain2parse1, const vector<string> &chain2parse2,
+    const vector<string> &model2parse1, const vector<string> &model2parse2,
+    const int byresi_opt, const vector<string> &chain1_list,
+    const vector<string> &chain2_list, const int hinge_opt, 
+    double tm_threshold = 0.6, int min_length = 50) 
+{
+    vector<vector<string>> PDB_lines1, PDB_lines2;
+    vector<int> mol_vec1, mol_vec2;
+    vector<string> chainID_list1, chainID_list2;
+    int read_resi = byresi_opt; 
+    if (byresi_opt == 0 && o_opt) read_resi = 2;
+
+    for (int i = 0; i < chain1_list.size(); i++) {
+        xname = chain1_list[i];
+        int xchainnum = get_PDB_lines(xname, PDB_lines1, chainID_list1, mol_vec1, ter_opt, infmt1_opt, atom_opt, autojustify, split_opt, het_opt, chain2parse1, model2parse1);
+        if (!xchainnum) continue;
+
+        for (int chain_i = 0; chain_i < xchainnum; chain_i++) {
+            int xlen = PDB_lines1[chain_i].size();
+            if (mol_opt == "RNA") mol_vec1[chain_i] = 1; else if (mol_opt == "protein") mol_vec1[chain_i] = -1;
+            if (xlen < 3) continue;
+
+            double **xa; NewArray(&xa, xlen, 3);
+            char *seqx = new char[xlen + 1]; char *secx = new char[xlen + 1];
+            vector<string> resi_vec1;
+            read_PDB(PDB_lines1[chain_i], xa, seqx, resi_vec1, read_resi);
+            if (mirror_opt) for (int r = 0; r < xlen; r++) xa[r][2] = -xa[r][2];
+            (mol_vec1[chain_i] > 0) ? make_sec(seqx, xa, xlen, secx, atom_opt) : make_sec(xa, xlen, secx);
+
+            for (int j = (dir_opt.size() > 0) * (i + 1); j < chain2_list.size(); j++) {
+                if (dirpair_opt.size() && i != j) continue;
+                if (PDB_lines2.size() == 0) {
+                    yname = chain2_list[j];
+                    int ychainnum = get_PDB_lines(yname, PDB_lines2, chainID_list2, mol_vec2, ter_opt, infmt2_opt, atom_opt, autojustify, split_opt, het_opt, chain2parse2, model2parse2);
+                    if (!ychainnum) continue;
+                }
+
+                for (int chain_j = 0; chain_j < PDB_lines2.size(); chain_j++) {
+                    int ylen = PDB_lines2[chain_j].size();
+                    if (mol_opt == "RNA") mol_vec2[chain_j] = 1; else if (mol_opt == "protein") mol_vec2[chain_j] = -1;
+                    if (ylen < 3) continue;
+
+                    double **ya; NewArray(&ya, ylen, 3);
+                    char *seqy = new char[ylen + 1]; char *secy = new char[ylen + 1];
+                    vector<string> resi_vec2;
+                    read_PDB(PDB_lines2[chain_j], ya, seqy, resi_vec2, read_resi);
+                    (mol_vec2[chain_j] > 0) ? make_sec(seqy, ya, ylen, secy, atom_opt) : make_sec(ya, ylen, secy);
+
+                    // =======================================
+                    // === Bisection 专属逻辑与数据流合并 ===
+                    // =======================================
+                    int global_short_L = min(xlen, ylen);
+                    if (!u_opt) Lnorm_ass = global_short_L; // 强制启用 User-specified 归一化统计累加分数
+                    
+                    vector<int> map1, map2;
+                    get_full_mapping(string(seqx), string(seqy), map1, map2);
+
+                    vector<BisectRes> results;
+                    recursive_bisection(
+                        xa, ya, string(seqx), string(seqy), string(secx), string(secy),
+                        0, xlen - 1, 0, ylen - 1, map1, map2, Lnorm_ass, tm_threshold, min_length,
+                        mol_vec1[chain_i] + mol_vec2[chain_j], hinge_opt, i_opt, a_opt, 
+                        true /* 锁定 u_opt 为 true 获取全局分布 */, d_opt, d0_scale, fast_opt, sequence, results
+                    );
+
+                    // 结果拼接
+                    double final_TM_u = 0.0;
+                    string final_seqxA = "", final_seqyA = "", final_seqM = "";
+                    vector<vector<double>> final_tu_vec;
+                    int final_L_ali = 0;
+                    double final_Liden = 0, final_TM_ali = 0, final_rmsd_ali = 0;
+
+                    for (size_t rIdx = 0; rIdx < results.size(); rIdx++) {
+                        BisectRes& res = results[rIdx];
+                        final_TM_u += res.TM_u; // TM 累加
+                        final_L_ali += res.L_ali;
+                        final_Liden += res.Liden;
+                        final_TM_ali += res.TM_ali;
+                        final_rmsd_ali += res.rmsd_ali; // 简单累加，严格意义上需要整体重新 Kabsch，这里为了输出妥协
+
+                        for (auto& t : res.tu_vec) final_tu_vec.push_back(t);
+                        
+                        if (rIdx > 0) {
+                            final_seqxA += "*"; final_seqyA += "*"; final_seqM += "*";
+                        }
+                        final_seqxA += res.seqxA; final_seqyA += res.seqyA; final_seqM += res.seqM;
+                    }
+
+                    // 取第一个有效切片的位移矩阵作为 t0, u0 兼容打印（仅作基准展示）
+                    double best_t0[3] = {0}, best_u0[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
+                    if (!final_tu_vec.empty()) {
+                        for(int k=0; k<3; k++) for(int l=0; l<3; l++) best_u0[k][l] = final_tu_vec[0][k*3+l];
+                        for(int k=0; k<3; k++) best_t0[k] = final_tu_vec[0][9+k];
+                    }
+
+                    if (outfmt_opt == 0) print_version();
+                    
+                    // 输出调用
+                    output_flexalign_results(
+                        xname.substr(dir1_opt.size() + dir_opt.size() + dirpair_opt.size()),
+                        yname.substr(dir2_opt.size() + dir_opt.size() + dirpair_opt.size()),
+                        chainID_list1[chain_i], chainID_list2[chain_j],
+                        xlen, ylen, best_t0, best_u0, final_tu_vec, 
+                        final_TM_u, final_TM_u, final_TM_u, final_TM_u, final_TM_u, // 占位传导 TM Score
+                        0.0 /*RMSD placeholder*/, 5.0, final_seqM.c_str(), final_seqxA.c_str(), final_seqyA.c_str(), 
+                        final_Liden, final_L_ali, final_L_ali, final_TM_ali, final_rmsd_ali, 
+                        0.0, 0.0, 0.0, 0.0, Lnorm_ass, d0_scale, 0.0, 0.0,
+                        (m_opt ? fname_matrix : "").c_str(), outfmt_opt, ter_opt, false, split_opt, o_opt,
+                        fname_super, i_opt, a_opt, u_opt, d_opt, mirror_opt, resi_vec1, resi_vec2
+                    );
+
+                    // Memory Cleanup
+                    delete[] seqy; delete[] secy; DeleteArray(&ya, ylen);
+                }
+            }
+            delete[] seqx; delete[] secx; DeleteArray(&xa, xlen);
+        }
+        PDB_lines1.clear();
+    }
+    return 0;
+}
+
 int main(int argc, char *argv[])
 {
     if (argc < 2)
@@ -4173,6 +4486,14 @@ int main(int argc, char *argv[])
                        atom_opt, autojustify, mol_opt, dir_opt, dirpair_opt, dir1_opt,
                        dir2_opt, chain2parse1, chain2parse2, model2parse1, model2parse2,
                        byresi_opt, chain1_list, chain2_list, hinge_opt);
+    else if (mm_opt == 10)
+        flexalign_bisection(xname, yname, fname_super, fname_lign,
+                       fname_matrix, sequence, Lnorm_ass, d0_scale, m_opt, i_opt, o_opt,
+                       a_opt, u_opt, d_opt, TMcut, infmt1_opt, infmt2_opt, ter_opt,
+                       split_opt, outfmt_opt, fast_opt, mirror_opt, het_opt,
+                       atom_opt, autojustify, mol_opt, dir_opt, dirpair_opt, dir1_opt,
+                       dir2_opt, chain2parse1, chain2parse2, model2parse1, model2parse2,
+                       byresi_opt, chain1_list, chain2_list, hinge_opt, 0.6, 50);
     else
         cerr << "WARNING! -mm " << mm_opt << " not implemented" << endl;
 
