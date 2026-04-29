@@ -3554,6 +3554,7 @@ struct BisectRes {
     string seqxA, seqyA, seqM;
     vector<vector<double>> tu_vec;
     int L_ali;
+    int n_ali8; // <--- 新增：保存距离小于 8 Angstrom 的比对对数
     double Liden, TM_ali, rmsd_ali;
 };
 
@@ -3624,7 +3625,9 @@ void recursive_bisection(
             best_res.avg_TM = cur_avg_TM;
             best_res.TM_u = TM4; // TM4 承载基于 Lnorm_ass (user-specified) 的归一化分数
             best_res.seqxA = seqxA; best_res.seqyA = seqyA; best_res.seqM = seqM;
-            best_res.L_ali = L_ali; best_res.Liden = Liden;
+            best_res.L_ali = L_ali;
+            best_res.n_ali8 = n_ali8; // <--- 新增：记录 n_ali8
+            best_res.Liden = Liden;
             best_res.TM_ali = TM_ali; best_res.rmsd_ali = rmsd_ali;
             
             best_res.tu_vec.clear();
@@ -3743,15 +3746,20 @@ int flexalign_bisection(string &xname, string &yname, const string &fname_super,
                     string final_seqxA = "", final_seqyA = "", final_seqM = "";
                     vector<vector<double>> final_tu_vec;
                     int final_L_ali = 0;
-                    double final_Liden = 0, final_TM_ali = 0, final_rmsd_ali = 0;
+                    int final_n_ali8 = 0;
+                    double final_Liden = 0, final_TM_ali = 0;
+                    double sum_sq_dist = 0.0; // 用于正确计算全局 RMSD
 
                     for (size_t rIdx = 0; rIdx < results.size(); rIdx++) {
                         BisectRes& res = results[rIdx];
                         final_TM_u += res.TM_u; // TM 累加
                         final_L_ali += res.L_ali;
+                        final_n_ali8 += res.n_ali8;
                         final_Liden += res.Liden;
                         final_TM_ali += res.TM_ali;
-                        final_rmsd_ali += res.rmsd_ali; // 简单累加，严格意义上需要整体重新 Kabsch，这里为了输出妥协
+                        
+                        // 正确的 RMSD 聚合：基于每个 block 的平方和累加
+                        sum_sq_dist += res.L_ali * res.rmsd_ali * res.rmsd_ali;
 
                         for (auto& t : res.tu_vec) final_tu_vec.push_back(t);
                         
@@ -3760,6 +3768,14 @@ int flexalign_bisection(string &xname, string &yname, const string &fname_super,
                         }
                         final_seqxA += res.seqxA; final_seqyA += res.seqyA; final_seqM += res.seqM;
                     }
+
+                    // 计算真正的合并后 RMSD
+                    double final_rmsd_ali = (final_L_ali > 0) ? sqrt(sum_sq_dist / final_L_ali) : 0.0;
+                    
+                    // 还原 TM1 和 TM2 分数（考虑到 xlen 和 ylen 不同的情况）
+                    double sum_tm_raw = final_TM_u * Lnorm_ass;
+                    double final_TM1 = sum_tm_raw / xlen;
+                    double final_TM2 = sum_tm_raw / ylen;
 
                     // 取第一个有效切片的位移矩阵作为 t0, u0 兼容打印（仅作基准展示）
                     double best_t0[3] = {0}, best_u0[3][3] = {{1,0,0},{0,1,0},{0,0,1}};
@@ -3770,15 +3786,16 @@ int flexalign_bisection(string &xname, string &yname, const string &fname_super,
 
                     if (outfmt_opt == 0) print_version();
                     
-                    // 输出调用
+                    // 输出调用（修正了参数顺序错误问题）
                     output_flexalign_results(
                         xname.substr(dir1_opt.size() + dir_opt.size() + dirpair_opt.size()),
                         yname.substr(dir2_opt.size() + dir_opt.size() + dirpair_opt.size()),
                         chainID_list1[chain_i], chainID_list2[chain_j],
                         xlen, ylen, best_t0, best_u0, final_tu_vec, 
-                        final_TM_u, final_TM_u, final_TM_u, final_TM_u, final_TM_u, // 占位传导 TM Score
-                        0.0 /*RMSD placeholder*/, 5.0, final_seqM.c_str(), final_seqxA.c_str(), final_seqyA.c_str(), 
-                        final_Liden, final_L_ali, final_L_ali, final_TM_ali, final_rmsd_ali, 
+                        final_TM1, final_TM2, final_TM_u, final_TM_u, final_TM_u, // 正确缩放的 TM1 和 TM2
+                        final_rmsd_ali /*用真实 RMSD 作为 placeholder*/, 5.0, 
+                        final_seqM.c_str(), final_seqxA.c_str(), final_seqyA.c_str(), 
+                        final_Liden, final_n_ali8, final_L_ali, final_TM_ali, final_rmsd_ali, // 修正参数位置
                         0.0, 0.0, 0.0, 0.0, Lnorm_ass, d0_scale, 0.0, 0.0,
                         (m_opt ? fname_matrix : "").c_str(), outfmt_opt, ter_opt, false, split_opt, o_opt,
                         fname_super, i_opt, a_opt, u_opt, d_opt, mirror_opt, resi_vec1, resi_vec2
