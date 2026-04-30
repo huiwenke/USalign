@@ -749,7 +749,20 @@ void output_flexalign_rasmol(const string xname, const string yname,
                     break;
             }
         }
-        resi2hinge_dict[resi_vec1[j]] = hinge_char - '0';
+        int hinge_idx = 0;
+        if (hinge_char >= '0' && hinge_char <= '9')
+        {
+            hinge_idx = hinge_char - '0';
+        }
+        else if (hinge_char >= 'a' && hinge_char <= 'z')
+        {
+            hinge_idx = hinge_char - 'a' + 10;
+        }
+        else if (hinge_char >= 'A' && hinge_char <= 'Z')
+        {
+            hinge_idx = hinge_char - 'A' + 36;
+        }
+        resi2hinge_dict[resi_vec1[j]] = hinge_idx;
     }
     string resi = resi_vec1[0];
     int read_resi = resi.size() - 4;
@@ -1556,7 +1569,20 @@ void output_flexalign_pymol(const string xname, const string yname,
                     break;
             }
         }
-        resi2hinge_dict[resi_vec1[j]] = hinge_char - '0';
+        int hinge_idx = 0;
+        if (hinge_char >= '0' && hinge_char <= '9')
+        {
+            hinge_idx = hinge_char - '0';
+        }
+        else if (hinge_char >= 'a' && hinge_char <= 'z')
+        {
+            hinge_idx = hinge_char - 'a' + 10;
+        }
+        else if (hinge_char >= 'A' && hinge_char <= 'Z')
+        {
+            hinge_idx = hinge_char - 'A' + 36;
+        }
+        resi2hinge_dict[resi_vec1[j]] = hinge_idx;
     }
     string resi = resi_vec1[0];
     int read_resi = resi.size() - 4;
