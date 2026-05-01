@@ -6,6 +6,7 @@
 
 # binary executables
 addChainID
+biounitasym
 cif2pdb
 TMalign
 TMalignc

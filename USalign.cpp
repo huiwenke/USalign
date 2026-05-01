@@ -95,6 +95,9 @@ void print_extra_help()
             //"\n"
             //" -hinge   Maximum number of hinge allowed in flexible alignment. default: 9\n"
             "\n"
+            "  -TMflex TM-score threshold for bisection flexible alignment\n"
+            "          (-mm 10). Default is 0.6.\n"
+            "\n"
             "   -se    Do not perform superposition. Useful for extracting alignment from\n"
             "          superposed structure pairs\n"
             "\n"
@@ -3378,7 +3381,7 @@ int flexalign_unified(string &xname, string &yname, const string &fname_super,
                         int start_ss = (mode == FLEX_BEST) ? 0 : ss_opt;
                         int end_ss = (mode == FLEX_BEST) ? 1 : ss_opt;
 
-                        bool force_fast_opt = (getmin(xlen, ylen) > ((mode == FLEX_STANDARD) ? 2000 : 1500)) ? true : fast_opt;
+                        bool force_fast_opt = (getmin(xlen, ylen) > 1500) ? true : fast_opt;
 
                         for (int cur_ss_opt = start_ss; cur_ss_opt <= end_ss; cur_ss_opt++)
                         {
@@ -3515,6 +3518,7 @@ int main(int argc, char *argv[])
     int closeK_opt = -1;        // number of atoms for SOI initial alignment.
                                 // 5 and 0 for -mm 5 and 6
     int hinge_opt = 9;          // maximum number of hinge allowed for flexible
+    double tmflex_opt = 0.6;        // TM-score threshold for -mm 10
     int mirror_opt = 0;         // do not align mirror
     int het_opt = 0;            // do not read HETATM residues
     int mm_opt = 0;             // do not perform MM-align
@@ -3641,6 +3645,13 @@ int main(int argc, char *argv[])
             if (i >= (argc - 1))
                 PrintErrorAndQuit("ERROR! Missing value for -hinge");
             hinge_opt = atoi(argv[i + 1]);
+            i++;
+        }
+        else if (!strcmp(argv[i], "-TMflex"))
+        {
+            if (i >= (argc - 1))
+                PrintErrorAndQuit("ERROR! Missing value for -TMflex");
+            tmflex_opt = atof(argv[i + 1]);
             i++;
         }
         else if (!strcmp(argv[i], "-v"))
@@ -4171,7 +4182,7 @@ int main(int argc, char *argv[])
                             split_opt, outfmt_opt, fast_opt, mirror_opt, het_opt,
                             atom_opt, autojustify, mol_opt, dir_opt, dirpair_opt, dir1_opt,
                             dir2_opt, chain2parse1, chain2parse2, model2parse1, model2parse2,
-                            byresi_opt, chain1_list, chain2_list, hinge_opt, 0.7, 50);
+                            byresi_opt, chain1_list, chain2_list, hinge_opt, tmflex_opt, 50);
     else
         cerr << "WARNING! -mm " << mm_opt << " not implemented" << endl;
 
