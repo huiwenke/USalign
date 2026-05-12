@@ -2936,11 +2936,11 @@ void execute_flexalign_with_fallback(
     }
 }
 
-
 // ==========================================
 // FATCAT Core Algorithm (flexalign_fatcat_main)
 // ==========================================
-struct FATCAT_AFP {
+struct FATCAT_AFP
+{
     int i, j, len;
     double score;
     double R[3][3];
@@ -2948,20 +2948,20 @@ struct FATCAT_AFP {
 };
 
 int flexalign_fatcat_main(double **xa, double **ya,
-    const char *seqx, const char *seqy, const char *secx, const char *secy,
-    double t0[3], double u0[3][3], vector<vector<double>> &tu_vec,
-    double &TM1, double &TM2, double &TM3, double &TM4, double &TM5,
-    double &d0_0, double &TM_0,
-    double &d0A, double &d0B, double &d0u, double &d0a, double &d0_out,
-    string &seqM, string &seqxA, string &seqyA, vector<double> &do_vec,
-    double &rmsd0, int &L_ali, double &Liden,
-    double &TM_ali, double &rmsd_ali, int &n_ali, int &n_ali8,
-    const int xlen, const int ylen,
-    const vector<string> sequence, const double Lnorm_ass,
-    const double d0_scale, const int i_opt, const int a_opt,
-    const bool u_opt, const bool d_opt, const bool fast_opt,
-    const int mol_type, const int hinge_opt, const int ss_opt,
-    int sparse_val = 0)
+                          const char *seqx, const char *seqy, const char *secx, const char *secy,
+                          double t0[3], double u0[3][3], std::vector<std::vector<double>> &tu_vec,
+                          double &TM1, double &TM2, double &TM3, double &TM4, double &TM5,
+                          double &d0_0, double &TM_0,
+                          double &d0A, double &d0B, double &d0u, double &d0a, double &d0_out,
+                          std::string &seqM, std::string &seqxA, std::string &seqyA, std::vector<double> &do_vec,
+                          double &rmsd0, int &L_ali, double &Liden,
+                          double &TM_ali, double &rmsd_ali, int &n_ali, int &n_ali8,
+                          const int xlen, const int ylen,
+                          const std::vector<std::string> sequence, const double Lnorm_ass,
+                          const double d0_scale, const int i_opt, const int a_opt,
+                          const bool u_opt, const bool d_opt, const bool fast_opt,
+                          const int mol_type, const int hinge_opt, const int ss_opt,
+                          int sparse_val = 0)
 {
     // FATCAT base parameters
     int fragLen = 8;
@@ -2980,55 +2980,88 @@ int flexalign_fatcat_main(double **xa, double **ya,
     double afp_dis_cut = fragLen * fragLen * (disCut * disCut);
 
     // ==========================================
+    // OPTIMIZATION 1: Precompute local intra-protein distance matrices
+    // This entirely eliminates the costly sqrt() calls inside the O(N^2 * fragLen^2) DP loop.
+    // ==========================================
+    int max_dist_window = max_gap + 2 * fragLen + 1;
+    std::vector<std::vector<double>> disTable1(xlen, std::vector<double>(max_dist_window, 0.0));
+    std::vector<std::vector<double>> disTable2(ylen, std::vector<double>(max_dist_window, 0.0));
+
+    for (int i = 0; i < xlen; i++)
+    {
+        for (int j = i; j < std::min(xlen, i + max_dist_window); j++)
+        {
+            double dx = xa[i][0] - xa[j][0];
+            double dy = xa[i][1] - xa[j][1];
+            double dz = xa[i][2] - xa[j][2];
+            disTable1[i][j - i] = std::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+    }
+    for (int i = 0; i < ylen; i++)
+    {
+        for (int j = i; j < std::min(ylen, i + max_dist_window); j++)
+        {
+            double dx = ya[i][0] - ya[j][0];
+            double dy = ya[i][1] - ya[j][1];
+            double dz = ya[i][2] - ya[j][2];
+            disTable2[i][j - i] = std::sqrt(dx * dx + dy * dy + dz * dz);
+        }
+    }
+
+    // ==========================================
     // Step 1: Extract initial AFPs in batches
     // ==========================================
-    vector<FATCAT_AFP> initial_afps;
+    std::vector<FATCAT_AFP> initial_afps;
     int step = sparse_val + 1;
-    
-    // Optimization: Use stack memory for the tight O(N^2) loop
+
     double r1_static[8][3], r2_static[8][3];
     double *r1[8], *r2[8];
-    for (int k = 0; k < 8; k++) {
+    for (int k = 0; k < 8; k++)
+    {
         r1[k] = r1_static[k];
         r2[k] = r2_static[k];
     }
 
-    for (int i = 0; i <= xlen - fragLen; i += step) {
-        for (int j = 0; j <= ylen - fragLen; j += step) {
-            int d3_term = min(i, j) + min(xlen - (i + fragLen), ylen - (j + fragLen)) + fragLen;
-            if (d3_term < 0.3 * min(xlen, ylen)) continue;
+    for (int i = 0; i <= xlen - fragLen; i += step)
+    {
+        for (int j = 0; j <= ylen - fragLen; j += step)
+        {
+            int d3_term = std::min(i, j) + std::min(xlen - (i + fragLen), ylen - (j + fragLen)) + fragLen;
+            if (d3_term < 0.3 * std::min(xlen, ylen))
+                continue;
 
-            // Explicit Euclidean distance math
-            double dx1 = xa[i + fragLen - 1][0] - xa[i][0];
-            double dy1 = xa[i + fragLen - 1][1] - xa[i][1];
-            double dz1 = xa[i + fragLen - 1][2] - xa[i][2];
-            double d1 = sqrt(dx1*dx1 + dy1*dy1 + dz1*dz1);
+            double dist1 = disTable1[i][fragLen - 1]; // Precomputed end-to-end distance
+            double dist2 = disTable2[j][fragLen - 1];
 
-            double dx2 = ya[j + fragLen - 1][0] - ya[j][0];
-            double dy2 = ya[j + fragLen - 1][1] - ya[j][1];
-            double dz2 = ya[j + fragLen - 1][2] - ya[j][2];
-            double d2 = sqrt(dx2*dx2 + dy2*dy2 + dz2*dz2);
+            if (std::fabs(dist1 - dist2) > 2.0 * rmsdCut)
+                continue;
 
-            // Use fabs() instead of abs()
-            if (fabs(d1 - d2) > 2.0 * rmsdCut) continue;
-
-            for (int k = 0; k < fragLen; k++) {
-                r1[k][0] = xa[i + k][0]; r1[k][1] = xa[i + k][1]; r1[k][2] = xa[i + k][2];
-                r2[k][0] = ya[j + k][0]; r2[k][1] = ya[j + k][1]; r2[k][2] = ya[j + k][2];
+            for (int k = 0; k < fragLen; k++)
+            {
+                r1[k][0] = xa[i + k][0];
+                r1[k][1] = xa[i + k][1];
+                r1[k][2] = xa[i + k][2];
+                r2[k][0] = ya[j + k][0];
+                r2[k][1] = ya[j + k][1];
+                r2[k][2] = ya[j + k][2];
             }
-            
-            // Mode=0 to compute correct error, then map to RMSD manually
+
             double rms_sum_sq, t_tmp[3], u_tmp[3][3];
             Kabsch(r1, r2, fragLen, 0, &rms_sum_sq, t_tmp, u_tmp);
-            double rmsd_tmp = sqrt(rms_sum_sq / fragLen);
+            double rmsd_tmp = std::sqrt(rms_sum_sq / fragLen);
 
-            if (rmsd_tmp < rmsdCut) {
+            if (rmsd_tmp < rmsdCut)
+            {
                 FATCAT_AFP afp;
-                afp.i = i; afp.j = j; afp.len = fragLen;
+                afp.i = i;
+                afp.j = j;
+                afp.len = fragLen;
                 afp.score = resScore * fragLen * (1.0 - (rmsd_tmp / badRmsd) * (rmsd_tmp / badRmsd));
-                for (int a = 0; a < 3; a++) {
+                for (int a = 0; a < 3; a++)
+                {
                     afp.t[a] = t_tmp[a];
-                    for (int b = 0; b < 3; b++) afp.R[a][b] = u_tmp[a][b];
+                    for (int b = 0; b < 3; b++)
+                        afp.R[a][b] = u_tmp[a][b];
                 }
                 initial_afps.push_back(afp);
             }
@@ -3038,52 +3071,72 @@ int flexalign_fatcat_main(double **xa, double **ya,
     // ==========================================
     // Step 2: Merge diagonal AFPs
     // ==========================================
-    map<int, vector<FATCAT_AFP>> diagonals;
-    for (size_t k = 0; k < initial_afps.size(); k++) {
-        diagonals[initial_afps[k].i - initial_afps[k].j].push_back(initial_afps[k]);
+    // OPTIMIZATION 2: Flat vector instead of std::map
+    int max_diagonal_idx = xlen + ylen + 1;
+    std::vector<std::vector<FATCAT_AFP>> diagonals(max_diagonal_idx);
+    for (size_t k = 0; k < initial_afps.size(); k++)
+    {
+        diagonals[initial_afps[k].i - initial_afps[k].j + ylen].push_back(initial_afps[k]);
     }
-    
-    vector<FATCAT_AFP> merged_afps;
-    for (map<int, vector<FATCAT_AFP>>::iterator it = diagonals.begin(); it != diagonals.end(); ++it) {
-        vector<FATCAT_AFP>& group = it->second;
-        for (size_t a = 0; a < group.size(); a++) {
-            for (size_t b = a + 1; b < group.size(); b++) {
-                if (group[b].i < group[a].i) {
-                    FATCAT_AFP tmp = group[a]; group[a] = group[b]; group[b] = tmp;
-                }
-            }
-        }
+
+    std::vector<FATCAT_AFP> merged_afps;
+
+    // OPTIMIZATION 4: Pre-allocate max buffers for merge checking
+    int max_merge_len = std::min(xlen, ylen);
+    double **r1_merge, **r2_merge;
+    NewArray(&r1_merge, max_merge_len, 3);
+    NewArray(&r2_merge, max_merge_len, 3);
+
+    for (int d = 0; d < max_diagonal_idx; d++)
+    {
+        if (diagonals[d].empty())
+            continue;
+        std::vector<FATCAT_AFP> &group = diagonals[d];
+
+        // OPTIMIZATION 3: O(N log N) std::sort instead of O(N^2) loops
+        std::sort(group.begin(), group.end(), [](const FATCAT_AFP &a, const FATCAT_AFP &b)
+                  { return a.i < b.i; });
+
         int n_group = group.size();
-        vector<bool> invalid(n_group, false);
-        for (int idx = 0; idx < n_group; idx++) {
-            if (invalid[idx]) continue;
+        std::vector<bool> invalid(n_group, false);
+        for (int idx = 0; idx < n_group; idx++)
+        {
+            if (invalid[idx])
+                continue;
             FATCAT_AFP curr = group[idx];
-            for (int nxt_idx = idx + 1; nxt_idx < n_group; nxt_idx++) {
+            for (int nxt_idx = idx + 1; nxt_idx < n_group; nxt_idx++)
+            {
                 FATCAT_AFP nxt = group[nxt_idx];
-                if (nxt.i > curr.i + curr.len) break;
-                
-                if (nxt.i + nxt.len > curr.i + curr.len) {
+                if (nxt.i > curr.i + curr.len)
+                    break;
+
+                if (nxt.i + nxt.len > curr.i + curr.len)
+                {
                     int new_len = (nxt.i + nxt.len) - curr.i;
-                    double **r1_merge, **r2_merge;
-                    NewArray(&r1_merge, new_len, 3);
-                    NewArray(&r2_merge, new_len, 3);
-                    for (int k = 0; k < new_len; k++) {
-                        r1_merge[k][0] = xa[curr.i + k][0]; r1_merge[k][1] = xa[curr.i + k][1]; r1_merge[k][2] = xa[curr.i + k][2];
-                        r2_merge[k][0] = ya[curr.j + k][0]; r2_merge[k][1] = ya[curr.j + k][1]; r2_merge[k][2] = ya[curr.j + k][2];
+
+                    // Directly use pre-allocated buffers
+                    for (int k = 0; k < new_len; k++)
+                    {
+                        r1_merge[k][0] = xa[curr.i + k][0];
+                        r1_merge[k][1] = xa[curr.i + k][1];
+                        r1_merge[k][2] = xa[curr.i + k][2];
+                        r2_merge[k][0] = ya[curr.j + k][0];
+                        r2_merge[k][1] = ya[curr.j + k][1];
+                        r2_merge[k][2] = ya[curr.j + k][2];
                     }
-                    
-                    // Mode=0 to compute correct error
+
                     double rms_sum_sq, t_tmp[3], u_tmp[3][3];
                     Kabsch(r1_merge, r2_merge, new_len, 0, &rms_sum_sq, t_tmp, u_tmp);
-                    double rmsd_tmp = sqrt(rms_sum_sq / new_len);
-                    
-                    DeleteArray(&r1_merge, new_len); DeleteArray(&r2_merge, new_len);
+                    double rmsd_tmp = std::sqrt(rms_sum_sq / new_len);
 
-                    if (rmsd_tmp < rmsdCut) {
+                    if (rmsd_tmp < rmsdCut)
+                    {
                         curr.len = new_len;
-                        for (int a = 0; a < 3; a++) {
+                        for (int a = 0; a < 3; a++)
+                        {
                             curr.t[a] = t_tmp[a];
-                            for (int b = 0; b < 3; b++) curr.R[a][b] = u_tmp[a][b];
+                            for (int b = 0; b < 3; b++)
+                                curr.R[a][b] = u_tmp[a][b];
                         }
                         curr.score = resScore * new_len * (1.0 - (rmsd_tmp / badRmsd) * (rmsd_tmp / badRmsd));
                         invalid[nxt_idx] = true;
@@ -3093,106 +3146,150 @@ int flexalign_fatcat_main(double **xa, double **ya,
             merged_afps.push_back(curr);
         }
     }
-    
-    for (size_t a = 0; a < merged_afps.size(); a++) {
-        for (size_t b = a + 1; b < merged_afps.size(); b++) {
-            if (merged_afps[b].i < merged_afps[a].i || (merged_afps[b].i == merged_afps[a].i && merged_afps[b].j < merged_afps[a].j)) {
-                FATCAT_AFP tmp = merged_afps[a]; merged_afps[a] = merged_afps[b]; merged_afps[b] = tmp;
-            }
-        }
-    }
+    DeleteArray(&r1_merge, max_merge_len);
+    DeleteArray(&r2_merge, max_merge_len);
+
+    // Sort final merged afps
+    std::sort(merged_afps.begin(), merged_afps.end(), [](const FATCAT_AFP &a, const FATCAT_AFP &b)
+              {
+        if (a.i == b.i) return a.j < b.j;
+        return a.i < b.i; });
+
     int n_afps = merged_afps.size();
-    if (n_afps == 0) return 0;
+    if (n_afps == 0)
+        return 0;
 
     // ==========================================
     // Step 3: Global Dynamic Programming (DP)
     // ==========================================
-    vector<vector<int>> afp_aft_index(xlen, vector<int>(ylen, -1));
-    vector<vector<int>> afp_bef_index(xlen, vector<int>(ylen, -1));
-    map<int, vector<pair<int, int>>> i_to_j;
-    
-    for (int m = 0; m < n_afps; m++) {
-        i_to_j[merged_afps[m].i].push_back(make_pair(merged_afps[m].j, m));
+    // OPTIMIZATION 5: Flat 1D vectors for 2D DP cache
+    std::vector<int> afp_aft_index(xlen * ylen, -1);
+    std::vector<int> afp_bef_index(xlen * ylen, -1);
+
+    // Flat mapping instead of std::map
+    std::vector<std::vector<std::pair<int, int>>> i_to_j(xlen);
+    for (int m = 0; m < n_afps; m++)
+    {
+        i_to_j[merged_afps[m].i].push_back(std::make_pair(merged_afps[m].j, m));
     }
 
-    for (map<int, vector<pair<int, int>>>::iterator it = i_to_j.begin(); it != i_to_j.end(); ++it) {
-        int i_val = it->first;
-        for (size_t p = 0; p < it->second.size(); p++) {
-            afp_aft_index[i_val][it->second[p].first] = it->second[p].second;
-            afp_bef_index[i_val][it->second[p].first] = it->second[p].second;
+    for (int i_val = 0; i_val < xlen; i_val++)
+    {
+        if (i_to_j[i_val].empty())
+            continue;
+        for (size_t p = 0; p < i_to_j[i_val].size(); p++)
+        {
+            int j_val = i_to_j[i_val][p].first;
+            afp_aft_index[i_val * ylen + j_val] = i_to_j[i_val][p].second;
+            afp_bef_index[i_val * ylen + j_val] = i_to_j[i_val][p].second;
         }
         int curr_bef = -1;
-        for (int j_val = 0; j_val < ylen; j_val++) {
-            if (afp_bef_index[i_val][j_val] != -1) curr_bef = afp_bef_index[i_val][j_val];
-            else afp_bef_index[i_val][j_val] = curr_bef;
+        for (int j_val = 0; j_val < ylen; j_val++)
+        {
+            if (afp_bef_index[i_val * ylen + j_val] != -1)
+                curr_bef = afp_bef_index[i_val * ylen + j_val];
+            else
+                afp_bef_index[i_val * ylen + j_val] = curr_bef;
         }
         int curr_aft = -1;
-        for (int j_val = ylen - 1; j_val >= 0; j_val--) {
-            if (afp_aft_index[i_val][j_val] != -1) curr_aft = afp_aft_index[i_val][j_val];
-            else afp_aft_index[i_val][j_val] = curr_aft;
+        for (int j_val = ylen - 1; j_val >= 0; j_val--)
+        {
+            if (afp_aft_index[i_val * ylen + j_val] != -1)
+                curr_aft = afp_aft_index[i_val * ylen + j_val];
+            else
+                afp_aft_index[i_val * ylen + j_val] = curr_aft;
         }
     }
 
-    vector<double> sco(n_afps);
-    vector<int> twi(n_afps, 0);
-    vector<int> pre(n_afps, -1);
-    for (int m = 0; m < n_afps; m++) sco[m] = merged_afps[m].score;
+    std::vector<double> sco(n_afps);
+    std::vector<int> twi(n_afps, 0);
+    std::vector<int> pre(n_afps, -1);
+    for (int m = 0; m < n_afps; m++)
+        sco[m] = merged_afps[m].score;
 
-    for (int m = 0; m < n_afps; m++) {
+    for (int m = 0; m < n_afps; m++)
+    {
         int curr_i = merged_afps[m].i;
         int curr_j = merged_afps[m].j;
         int a3 = curr_i - fragLen;
-        int a2 = max(0, a3 - misCut);
-        int a1 = max(0, curr_i - maxGapFrag);
+        int a2 = std::max(0, a3 - misCut);
+        int a1 = std::max(0, curr_i - maxGapFrag);
         int b3 = curr_j - fragLen;
-        int b2 = max(0, b3 - misCut);
-        int b1 = max(0, curr_j - maxGapFrag);
+        int b2 = std::max(0, b3 - misCut);
+        int b1 = std::max(0, curr_j - maxGapFrag);
 
-        vector<int> valid_prevs;
-        for (int step = 0; step < 2; step++) {
+        std::vector<int> valid_prevs;
+        for (int step = 0; step < 2; step++)
+        {
             int a_s, a_e, b_s, b_e;
-            if (step == 0) { a_s = max(a1, 0); a_e = min(a3, xlen - 1); b_s = max(b2, 0); b_e = min(b3, ylen - 1); }
-            else           { a_s = max(a2, 0); a_e = min(a3, xlen - 1); b_s = max(b1, 0); b_e = min(b2 - 1, ylen - 1); }
-            
-            if (b_s >= ylen || b_e < 0) continue;
-            for (int prev_i = a_s; prev_i <= a_e; prev_i++) {
-                int s1 = afp_aft_index[prev_i][b_s];
-                int s2 = afp_bef_index[prev_i][b_e];
-                if (s1 != -1 && s2 != -1 && s1 <= s2) {
-                    for (int s = s1; s <= s2; s++) valid_prevs.push_back(s);
+            if (step == 0)
+            {
+                a_s = std::max(a1, 0);
+                a_e = std::min(a3, xlen - 1);
+                b_s = std::max(b2, 0);
+                b_e = std::min(b3, ylen - 1);
+            }
+            else
+            {
+                a_s = std::max(a2, 0);
+                a_e = std::min(a3, xlen - 1);
+                b_s = std::max(b1, 0);
+                b_e = std::min(b2 - 1, ylen - 1);
+            }
+
+            if (b_s >= ylen || b_e < 0)
+                continue;
+            for (int prev_i = a_s; prev_i <= a_e; prev_i++)
+            {
+                int s1 = afp_aft_index[prev_i * ylen + b_s];
+                int s2 = afp_bef_index[prev_i * ylen + b_e];
+                if (s1 != -1 && s2 != -1 && s1 <= s2)
+                {
+                    for (int s = s1; s <= s2; s++)
+                        valid_prevs.push_back(s);
                 }
             }
         }
 
         double curr_sco = merged_afps[m].score;
-        for (size_t v = 0; v < valid_prevs.size(); v++) {
+        for (size_t v = 0; v < valid_prevs.size(); v++)
+        {
             int prev = valid_prevs[v];
             int prev_twi = twi[prev];
-            if (prev_twi > max_twists) continue;
+            if (prev_twi > max_twists)
+                continue;
 
             int gap_i = curr_i - (merged_afps[prev].i + merged_afps[prev].len);
             int gap_j = curr_j - (merged_afps[prev].j + merged_afps[prev].len);
-            int m_gap = max(gap_i, gap_j);
+            int m_gap = std::max(gap_i, gap_j);
             int m_mis = 0;
-            if (gap_i < 0 || gap_j < 0) m_mis = (gap_i < gap_j) ? -gap_i : -gap_j;
+            if (gap_i < 0 || gap_j < 0)
+                m_mis = (gap_i < gap_j) ? -gap_i : -gap_j;
 
             double gp = gap_ext * m_mis;
-            if (m_gap > 0) gp += gap_ext * m_gap;
-            if (gp < max_penalty) gp = max_penalty;
+            if (m_gap > 0)
+                gp += gap_ext * m_gap;
+            if (gp < max_penalty)
+                gp = max_penalty;
 
-            // Explicit Euclidean math for distance differences
+            // USE PRECOMPUTED DISTANCES - O(1) inside loop
             double rms_sq = 0;
-            for (int k = 0; k < fragLen; k++) {
-                for (int l = 0; l < fragLen; l++) {
-                    double dx1 = xa[curr_i + k][0] - xa[merged_afps[prev].i + l][0];
-                    double dy1 = xa[curr_i + k][1] - xa[merged_afps[prev].i + l][1];
-                    double dz1 = xa[curr_i + k][2] - xa[merged_afps[prev].i + l][2];
-                    double dist1 = sqrt(dx1*dx1 + dy1*dy1 + dz1*dz1);
+            for (int k = 0; k < fragLen; k++)
+            {
+                for (int l = 0; l < fragLen; l++)
+                {
+                    double dist1, dist2;
+                    int idx1_a = curr_i + k, idx1_b = merged_afps[prev].i + l;
+                    if (idx1_a >= idx1_b)
+                        dist1 = disTable1[idx1_b][idx1_a - idx1_b];
+                    else
+                        dist1 = disTable1[idx1_a][idx1_b - idx1_a];
 
-                    double dx2 = ya[curr_j + k][0] - ya[merged_afps[prev].j + l][0];
-                    double dy2 = ya[curr_j + k][1] - ya[merged_afps[prev].j + l][1];
-                    double dz2 = ya[curr_j + k][2] - ya[merged_afps[prev].j + l][2];
-                    double dist2 = sqrt(dx2*dx2 + dy2*dy2 + dz2*dz2);
+                    int idx2_a = curr_j + k, idx2_b = merged_afps[prev].j + l;
+                    if (idx2_a >= idx2_b)
+                        dist2 = disTable2[idx2_b][idx2_a - idx2_b];
+                    else
+                        dist2 = disTable2[idx2_a][idx2_b - idx2_a];
 
                     rms_sq += (dist1 - dist2) * (dist1 - dist2);
                 }
@@ -3200,139 +3297,196 @@ int flexalign_fatcat_main(double **xa, double **ya,
 
             double tp = 0.0;
             int is_twist = 0;
-            if (rms_sq >= afp_dis_cut) {
-                tp = twist_pen; is_twist = 1;
-            } else {
-                double dvar = sqrt(rms_sq / (fragLen * fragLen));
-                if (dvar > disCut - disSmooth) tp = twist_pen * sqrt((dvar - disCut + disSmooth) / disSmooth);
+            if (rms_sq >= afp_dis_cut)
+            {
+                tp = twist_pen;
+                is_twist = 1;
+            }
+            else
+            {
+                double dvar = std::sqrt(rms_sq / (fragLen * fragLen));
+                if (dvar > disCut - disSmooth)
+                    tp = twist_pen * std::sqrt((dvar - disCut + disSmooth) / disSmooth);
             }
 
-            if (prev_twi + is_twist > max_twists) continue;
+            if (prev_twi + is_twist > max_twists)
+                continue;
 
             double stmp = sco[prev] + curr_sco + tp + gp;
-            if (stmp > sco[m]) {
-                sco[m] = stmp; pre[m] = prev; twi[m] = prev_twi + is_twist;
+            if (stmp > sco[m])
+            {
+                sco[m] = stmp;
+                pre[m] = prev;
+                twi[m] = prev_twi + is_twist;
             }
         }
     }
 
     int best_m = 0;
-    for (int m = 1; m < n_afps; m++) if (sco[m] > sco[best_m]) best_m = m;
+    for (int m = 1; m < n_afps; m++)
+        if (sco[m] > sco[best_m])
+            best_m = m;
 
-    vector<int> path;
+    std::vector<int> path;
     int curr_m = best_m;
-    while (curr_m != -1) { path.push_back(curr_m); curr_m = pre[curr_m]; }
-    reverse(path.begin(), path.end());
+    while (curr_m != -1)
+    {
+        path.push_back(curr_m);
+        curr_m = pre[curr_m];
+    }
+    std::reverse(path.begin(), path.end());
 
     // ==========================================
     // Step 4: Split structure based on twists
     // ==========================================
-    vector<vector<FATCAT_AFP>> blocks;
-    vector<FATCAT_AFP> curr_block;
+    std::vector<std::vector<FATCAT_AFP>> blocks;
+    std::vector<FATCAT_AFP> curr_block;
     curr_block.push_back(merged_afps[path[0]]);
-    for (size_t k = 1; k < path.size(); k++) {
+    for (size_t k = 1; k < path.size(); k++)
+    {
         FATCAT_AFP curr = merged_afps[path[k]];
         FATCAT_AFP prv = merged_afps[path[k - 1]];
-        
-        double rms_sq = 0;
-        for (int i_idx = 0; i_idx < fragLen; i_idx++) {
-            for (int j_idx = 0; j_idx < fragLen; j_idx++) {
-                double dx1 = xa[curr.i + i_idx][0] - xa[prv.i + j_idx][0];
-                double dy1 = xa[curr.i + i_idx][1] - xa[prv.i + j_idx][1];
-                double dz1 = xa[curr.i + i_idx][2] - xa[prv.i + j_idx][2];
-                double dist1 = sqrt(dx1*dx1 + dy1*dy1 + dz1*dz1);
 
-                double dx2 = ya[curr.j + i_idx][0] - ya[prv.j + j_idx][0];
-                double dy2 = ya[curr.j + i_idx][1] - ya[prv.j + j_idx][1];
-                double dz2 = ya[curr.j + i_idx][2] - ya[prv.j + j_idx][2];
-                double dist2 = sqrt(dx2*dx2 + dy2*dy2 + dz2*dz2);
+        // USE PRECOMPUTED DISTANCES - O(1) inside loop
+        double rms_sq = 0;
+        for (int i_idx = 0; i_idx < fragLen; i_idx++)
+        {
+            for (int j_idx = 0; j_idx < fragLen; j_idx++)
+            {
+                double dist1, dist2;
+                int idx1_a = curr.i + i_idx, idx1_b = prv.i + j_idx;
+                if (idx1_a >= idx1_b)
+                    dist1 = disTable1[idx1_b][idx1_a - idx1_b];
+                else
+                    dist1 = disTable1[idx1_a][idx1_b - idx1_a];
+
+                int idx2_a = curr.j + i_idx, idx2_b = prv.j + j_idx;
+                if (idx2_a >= idx2_b)
+                    dist2 = disTable2[idx2_b][idx2_a - idx2_b];
+                else
+                    dist2 = disTable2[idx2_a][idx2_b - idx2_a];
 
                 rms_sq += (dist1 - dist2) * (dist1 - dist2);
             }
         }
-        
-        double dvar = (rms_sq > afp_dis_cut) ? 1e9 : sqrt(rms_sq / (fragLen * fragLen));
-        if (dvar >= disCut) { blocks.push_back(curr_block); curr_block.clear(); }
+
+        double dvar = (rms_sq > afp_dis_cut) ? 1e9 : std::sqrt(rms_sq / (fragLen * fragLen));
+        if (dvar >= disCut)
+        {
+            blocks.push_back(curr_block);
+            curr_block.clear();
+        }
         curr_block.push_back(curr);
     }
     blocks.push_back(curr_block);
 
-    struct Region { int s1, e1, s2, e2; };
-    vector<Region> real_blocks;
+    struct Region
+    {
+        int s1, e1, s2, e2;
+    };
+    std::vector<Region> real_blocks;
     int last_i = 0, last_j = 0;
-    
-    for (size_t b = 0; b < blocks.size(); b++) {
+
+    for (size_t b = 0; b < blocks.size(); b++)
+    {
         int b_s1 = -1, b_e1 = -1, b_s2 = -1, b_e2 = -1;
-        for (size_t a = 0; a < blocks[b].size(); a++) {
+        for (size_t a = 0; a < blocks[b].size(); a++)
+        {
             FATCAT_AFP afp = blocks[b][a];
-            int skip = max(max(last_i - afp.i, last_j - afp.j), 0);
-            if (skip >= afp.len) continue;
-            
+            int skip = std::max(std::max(last_i - afp.i, last_j - afp.j), 0);
+            if (skip >= afp.len)
+                continue;
+
             int eff_i = afp.i + skip;
             int eff_j = afp.j + skip;
             int eff_L = afp.len - skip;
-            if (b_s1 == -1) { b_s1 = eff_i; b_s2 = eff_j; }
-            b_e1 = eff_i + eff_L; b_e2 = eff_j + eff_L;
-            last_i = b_e1; last_j = b_e2;
+            if (b_s1 == -1)
+            {
+                b_s1 = eff_i;
+                b_s2 = eff_j;
+            }
+            b_e1 = eff_i + eff_L;
+            b_e2 = eff_j + eff_L;
+            last_i = b_e1;
+            last_j = b_e2;
         }
-        if (b_s1 != -1) {
+        if (b_s1 != -1)
+        {
             Region r = {b_s1, b_e1, b_s2, b_e2};
             real_blocks.push_back(r);
         }
     }
-    if (real_blocks.empty()) return 0;
+    if (real_blocks.empty())
+        return 0;
 
-    // Calculate bounds using middle split strategy (0-based)
-    vector<int> bounds1, bounds2;
-    bounds1.push_back(0); bounds2.push_back(0);
-    for (size_t k = 0; k < real_blocks.size() - 1; k++) {
+    std::vector<int> bounds1, bounds2;
+    bounds1.push_back(0);
+    bounds2.push_back(0);
+    for (size_t k = 0; k < real_blocks.size() - 1; k++)
+    {
         bounds1.push_back((real_blocks[k].e1 + real_blocks[k + 1].s1) / 2);
         bounds2.push_back((real_blocks[k].e2 + real_blocks[k + 1].s2) / 2);
     }
-    bounds1.push_back(xlen); bounds2.push_back(ylen);
-
+    bounds1.push_back(xlen);
+    bounds2.push_back(ylen);
     // ==========================================
     // [DEBUG] TEMPORARY DEBUG OUTPUT
     // ==========================================
-    cout << "\n========================================" << endl;
-    cout << "PDB1 Interval: ";
-    for (size_t k = 0; k < bounds1.size() - 1; k++) {
-        cout << (bounds1[k] + 1) << "-" << bounds1[k + 1];
-        if (k < bounds1.size() - 2) cout << ",";
-    }
-    cout << "\nPDB2 Interval: ";
-    for (size_t k = 0; k < bounds2.size() - 1; k++) {
-        cout << (bounds2[k] + 1) << "-" << bounds2[k + 1];
-        if (k < bounds2.size() - 2) cout << ",";
-    }
-    cout << "\n========================================\n" << endl;
-
+    // cout << "\n========================================" << endl;
+    // cout << "PDB1 Interval: ";
+    // for (size_t k = 0; k < bounds1.size() - 1; k++)
+    // {
+    //     cout << (bounds1[k] + 1) << "-" << bounds1[k + 1];
+    //     if (k < bounds1.size() - 2)
+    //         cout << ",";
+    // }
+    // cout << "\nPDB2 Interval: ";
+    // for (size_t k = 0; k < bounds2.size() - 1; k++)
+    // {
+    //     cout << (bounds2[k] + 1) << "-" << bounds2[k + 1];
+    //     if (k < bounds2.size() - 2)
+    //         cout << ",";
+    // }
+    // cout << "\n========================================\n"
+    //      << endl;
     // ==========================================
     // Step 5: Iteratively align each block using TRUE flexalign_best logic
     // ==========================================
-    string global_seqM = "", global_seqxA = "", global_seqyA = "";
-    tu_vec.clear();
-    
-    // Array to map each global residue explicitly to its underlying rotation matrix
-    vector<int> global_res_tu(xlen, -1); 
+    std::string global_seqM = "", global_seqxA = "", global_seqyA = "";
+    // OPTIMIZATION 6: String capacity reservation to avoid reallocation overhead
+    global_seqM.reserve(xlen + ylen + max_gap);
+    global_seqxA.reserve(xlen + ylen + max_gap);
+    global_seqyA.reserve(xlen + ylen + max_gap);
 
-    for (size_t k = 0; k < bounds1.size() - 1; k++) {
+    tu_vec.clear();
+    std::vector<int> global_res_tu(xlen, -1);
+
+    for (size_t k = 0; k < bounds1.size() - 1; k++)
+    {
         int x_s = bounds1[k], x_e = bounds1[k + 1];
         int y_s = bounds2[k], y_e = bounds2[k + 1];
         int L1_sub = x_e - x_s;
         int L2_sub = y_e - y_s;
 
-        // Pad unaligned sequences to prevent coordinate desynchronization
-        if (L1_sub < 3 || L2_sub < 3) {
-            for (int i = 0; i < L1_sub; i++) {
-                global_seqxA += seqx[x_s + i]; global_seqyA += '-'; global_seqM += ' ';
+        // If the sub-region is too short, just fill with gaps
+        if (L1_sub < 3 || L2_sub < 3)
+        {
+            for (int i = 0; i < L1_sub; i++)
+            {
+                global_seqxA += seqx[x_s + i];
+                global_seqyA += '-';
+                global_seqM += ' ';
             }
-            for (int i = 0; i < L2_sub; i++) {
-                global_seqxA += '-'; global_seqyA += seqy[y_s + i]; global_seqM += ' ';
+            for (int i = 0; i < L2_sub; i++)
+            {
+                global_seqxA += '-';
+                global_seqyA += seqy[y_s + i];
+                global_seqM += ' ';
             }
             continue;
         }
 
+        // Allocate memory for sub-structures
         double **xa_sub, **ya_sub;
         NewArray(&xa_sub, L1_sub, 3);
         NewArray(&ya_sub, L2_sub, 3);
@@ -3341,33 +3495,52 @@ int flexalign_fatcat_main(double **xa, double **ya,
         char *secx_sub = new char[L1_sub + 1];
         char *secy_sub = new char[L2_sub + 1];
 
-        for (int i = 0; i < L1_sub; i++) {
-            xa_sub[i][0] = xa[x_s + i][0]; xa_sub[i][1] = xa[x_s + i][1]; xa_sub[i][2] = xa[x_s + i][2];
-            seqx_sub[i] = seqx[x_s + i]; secx_sub[i] = secx[x_s + i];
+        // Copy data for structure 1
+        for (int i = 0; i < L1_sub; i++)
+        {
+            xa_sub[i][0] = xa[x_s + i][0];
+            xa_sub[i][1] = xa[x_s + i][1];
+            xa_sub[i][2] = xa[x_s + i][2];
+            seqx_sub[i] = seqx[x_s + i];
+            secx_sub[i] = secx[x_s + i];
         }
-        seqx_sub[L1_sub] = '\0'; secx_sub[L1_sub] = '\0';
+        seqx_sub[L1_sub] = '\0';
+        secx_sub[L1_sub] = '\0';
 
-        for (int i = 0; i < L2_sub; i++) {
-            ya_sub[i][0] = ya[y_s + i][0]; ya_sub[i][1] = ya[y_s + i][1]; ya_sub[i][2] = ya[y_s + i][2];
-            seqy_sub[i] = seqy[y_s + i]; secy_sub[i] = secy[y_s + i];
+        // Copy data for structure 2
+        for (int i = 0; i < L2_sub; i++)
+        {
+            ya_sub[i][0] = ya[y_s + i][0];
+            ya_sub[i][1] = ya[y_s + i][1];
+            ya_sub[i][2] = ya[y_s + i][2];
+            seqy_sub[i] = seqy[y_s + i];
+            secy_sub[i] = secy[y_s + i];
         }
-        seqy_sub[L2_sub] = '\0'; secy_sub[L2_sub] = '\0';
+        seqy_sub[L2_sub] = '\0';
+        secy_sub[L2_sub] = '\0';
 
+        // Variables to store the best results for this sub-block
         double t0_best[3], u0_best[3][3];
         double TM_best_max = -1.0;
-        string seqM_best, seqxA_best, seqyA_best;
-        vector<vector<double>> tu_vec_best;
+        std::string seqM_best, seqxA_best, seqyA_best;
+        std::vector<std::vector<double>> tu_vec_best;
 
-        bool force_fast_opt = (getmin(L1_sub, L2_sub) > 1500) ? true : fast_opt;
-        for (int cur_ss_opt = 0; cur_ss_opt <= 1; cur_ss_opt++) {
+        bool force_fast_opt = (std::min(L1_sub, L2_sub) > 1500) ? true : fast_opt;
+        
+        // Test different secondary structure options (flexalign_best behavior)
+        for (int cur_ss_opt = 0; cur_ss_opt <= 1; cur_ss_opt++)
+        {
             double t0_s[3], u0_s[3][3];
-            vector<vector<double>> tu_vec_s;
-            double TM1_s=0, TM2_s=0, TM3_s=0, TM4_s=0, TM5_s=0;
-            double d0_0_s=0, TM_0_s=0, d0A_s=0, d0B_s=0, d0u_s=0, d0a_s=0, d0_out_s=5.0;
-            string seqM_s, seqxA_s, seqyA_s;
-            vector<double> do_vec_s;
-            double rmsd0_s=0; int L_ali_s=0; double Liden_s=0;
-            double TM_ali_s=0, rmsd_ali_s=0; int n_ali_s=0, n_ali8_s=0;
+            std::vector<std::vector<double>> tu_vec_s;
+            double TM1_s = 0, TM2_s = 0, TM3_s = 0, TM4_s = 0, TM5_s = 0;
+            double d0_0_s = 0, TM_0_s = 0, d0A_s = 0, d0B_s = 0, d0u_s = 0, d0a_s = 0, d0_out_s = 5.0;
+            std::string seqM_s, seqxA_s, seqyA_s;
+            std::vector<double> do_vec_s;
+            double rmsd0_s = 0;
+            int L_ali_s = 0;
+            double Liden_s = 0;
+            double TM_ali_s = 0, rmsd_ali_s = 0;
+            int n_ali_s = 0, n_ali8_s = 0;
 
             flexalign_main(
                 xa_sub, ya_sub, seqx_sub, seqy_sub, secx_sub, secy_sub,
@@ -3380,11 +3553,14 @@ int flexalign_fatcat_main(double **xa, double **ya,
                 mol_type, hinge_opt, cur_ss_opt);
 
             double cur_max_TM = (TM1_s > TM2_s) ? TM1_s : TM2_s;
-            if (cur_max_TM > TM_best_max) {
+            if (cur_max_TM > TM_best_max)
+            {
                 TM_best_max = cur_max_TM;
-                for(int a=0; a<3; a++) {
+                for (int a = 0; a < 3; a++)
+                {
                     t0_best[a] = t0_s[a];
-                    for(int b=0; b<3; b++) u0_best[a][b] = u0_s[a][b];
+                    for (int b = 0; b < 3; b++)
+                        u0_best[a][b] = u0_s[a][b];
                 }
                 seqM_best = seqM_s;
                 seqxA_best = seqxA_s;
@@ -3393,169 +3569,240 @@ int flexalign_fatcat_main(double **xa, double **ya,
             }
         }
 
-        if (TM_best_max < 0) {
-            for (int i = 0; i < L1_sub; i++) {
-                global_seqxA += seqx_sub[i]; global_seqyA += '-'; global_seqM += ' ';
+        // If alignment completely failed
+        if (TM_best_max < 0)
+        {
+            for (int i = 0; i < L1_sub; i++)
+            {
+                global_seqxA += seqx_sub[i];
+                global_seqyA += '-';
+                global_seqM += ' ';
             }
-            for (int i = 0; i < L2_sub; i++) {
-                global_seqxA += '-'; global_seqyA += seqy_sub[i]; global_seqM += ' ';
+            for (int i = 0; i < L2_sub; i++)
+            {
+                global_seqxA += '-';
+                global_seqyA += seqy_sub[i];
+                global_seqM += ' ';
             }
-            DeleteArray(&xa_sub, L1_sub); DeleteArray(&ya_sub, L2_sub);
-            delete[] seqx_sub; delete[] seqy_sub; delete[] secx_sub; delete[] secy_sub;
-            continue; 
+            DeleteArray(&xa_sub, L1_sub);
+            DeleteArray(&ya_sub, L2_sub);
+            delete[] seqx_sub;
+            delete[] seqy_sub;
+            delete[] secx_sub;
+            delete[] secy_sub;
+            continue;
         }
 
-        if (tu_vec_best.empty()) {
-            vector<double> tu_tmp(12);
+        // Ensure we have at least one valid transform matrix
+        if (tu_vec_best.empty())
+        {
+            std::vector<double> tu_tmp(12);
             t_u2tu(t0_best, u0_best, tu_tmp);
             tu_vec_best.push_back(tu_tmp);
         }
 
+        // Incorporate local transformation matrices into the global list
         int base_tu_idx = tu_vec.size();
-        for (size_t m = 0; m < tu_vec_best.size(); m++) {
+        for (size_t m = 0; m < tu_vec_best.size(); m++)
+        {
             tu_vec.push_back(tu_vec_best[m]);
         }
 
-        // ==========================================
-        // NEW FIX: Global numbering logic for 0-9, a-z, A-Z
-        // ==========================================
         int rx = x_s;
-        for (size_t i = 0; i < seqxA_best.length(); i++) {
-            int current_global_idx = base_tu_idx; 
-            
-            // Extract the true internal matrix map 
-            if (seqxA_best[i] != '-') {
-                char c = seqM_best[i];
-                if (c != ' ') {
-                    int local_hinge_idx = -1;
-                    if (c >= '1' && c <= '9') local_hinge_idx = c - '1'; // 1-based flexalign -> 0-based offset
-                    else if (c >= 'a' && c <= 'z') local_hinge_idx = c - 'a' + 9;
-                    
-                    if (local_hinge_idx >= 0 && local_hinge_idx < tu_vec_best.size()) {
-                        current_global_idx = base_tu_idx + local_hinge_idx;
-                    }
-                }
-                global_res_tu[rx] = current_global_idx;
-                rx++;
-            } else {
-                // Determine ID strictly for the visual formatting of Y-insertions
-                char c = seqM_best[i];
-                if (c != ' ') {
-                    int local_hinge_idx = -1;
-                    if (c >= '1' && c <= '9') local_hinge_idx = c - '1';
-                    else if (c >= 'a' && c <= 'z') local_hinge_idx = c - 'a' + 9;
-                    
-                    if (local_hinge_idx >= 0 && local_hinge_idx < tu_vec_best.size()) {
-                        current_global_idx = base_tu_idx + local_hinge_idx;
-                    }
+        
+        // FIX: current_global_idx must stay outside the character loop 
+        // to maintain the last known state across gaps or unaligned regions
+        int current_global_idx = base_tu_idx;
+
+        for (size_t i = 0; i < seqxA_best.length(); i++)
+        {
+            char c = seqM_best[i];
+
+            // Parse US-align standard hinge characters to update current global matrix index
+            // Valid hinge chars are '0'-'9', 'a'-'z', 'A'-'Z'. Exclude spaces and weak alignment chars.
+            if (c != ' ' && c != '.' && c != ':')
+            {
+                int local_hinge_idx = -1;
+                if (c >= '0' && c <= '9')
+                    local_hinge_idx = c - '0';
+                else if (c >= 'a' && c <= 'z')
+                    local_hinge_idx = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'Z')
+                    local_hinge_idx = c - 'A' + 36;
+
+                // Safely update the global index tracking
+                if (local_hinge_idx >= 0 && local_hinge_idx < tu_vec_best.size())
+                {
+                    current_global_idx = base_tu_idx + local_hinge_idx;
                 }
             }
-            
-            // Re-label matched areas starting sequentially from '0'
-            if (seqxA_best[i] != '-' && seqyA_best[i] != '-') {
-                char global_c;
-                if (current_global_idx < 10) global_c = '0' + current_global_idx;
-                else if (current_global_idx < 36) global_c = 'a' + (current_global_idx - 10);
-                else if (current_global_idx < 62) global_c = 'A' + (current_global_idx - 36);
-                else global_c = '*'; 
 
-                seqM_best[i] = global_c;
-            } else {
-                seqM_best[i] = ' '; // Standard gap alignment remains blank
+            // Assign the corresponding rotation matrix index to the original residue
+            if (seqxA_best[i] != '-')
+            {
+                global_res_tu[rx] = current_global_idx;
+                rx++;
+            }
+
+            // Construct the final stitched string format correctly
+            if (seqxA_best[i] != '-' && seqyA_best[i] != '-')
+            {
+                // Only assign a global hinge character if the local alignment considered it a true match
+                if (c != ' ' && c != '.' && c != ':')
+                {
+                    char global_c;
+                    if (current_global_idx < 10)
+                        global_c = '0' + current_global_idx;
+                    else if (current_global_idx < 36)
+                        global_c = 'a' + (current_global_idx - 10);
+                    else if (current_global_idx < 62)
+                        global_c = 'A' + (current_global_idx - 36);
+                    else
+                        global_c = '*'; // Fallback if hinges exceed 62
+
+                    seqM_best[i] = global_c;
+                }
+                else
+                {
+                    // Preserve weak matches ('.' or ':') or spaces
+                    seqM_best[i] = c;
+                }
+            }
+            else
+            {
+                seqM_best[i] = ' '; // Ensure gap positions correctly get space
             }
         }
 
+        // Append to the global alignment strings
         global_seqM += seqM_best;
         global_seqxA += seqxA_best;
         global_seqyA += seqyA_best;
 
+        // Clean up sub-block memory
         DeleteArray(&xa_sub, L1_sub);
         DeleteArray(&ya_sub, L2_sub);
-        delete[] seqx_sub; delete[] seqy_sub; delete[] secx_sub; delete[] secy_sub;
+        delete[] seqx_sub;
+        delete[] seqy_sub;
+        delete[] secx_sub;
+        delete[] secy_sub;
     }
 
     // ==========================================
-    // Step 6: Recalculate global metrics correctly 
+    // Step 6: Recalculate global metrics correctly
     // ==========================================
     seqM = global_seqM;
     seqxA = global_seqxA;
     seqyA = global_seqyA;
 
-    d0A = 1.24 * pow(ylen * 1.0 - 15.0, 1.0 / 3.0) - 1.8;
-    if (d0A < 0.5) d0A = 0.5;
-    d0B = 1.24 * pow(xlen * 1.0 - 15.0, 1.0 / 3.0) - 1.8;
-    if (d0B < 0.5) d0B = 0.5;
-    d0a = 1.24 * pow((xlen + ylen) * 0.5 - 15.0, 1.0 / 3.0) - 1.8;
-    if (d0a < 0.5) d0a = 0.5;
-    if (u_opt) {
-        d0u = 1.24 * pow(Lnorm_ass - 15.0, 1.0 / 3.0) - 1.8;
-        if (d0u < 0.5) d0u = 0.5;
+    d0A = 1.24 * std::pow(ylen * 1.0 - 15.0, 1.0 / 3.0) - 1.8;
+    if (d0A < 0.5)
+        d0A = 0.5;
+    d0B = 1.24 * std::pow(xlen * 1.0 - 15.0, 1.0 / 3.0) - 1.8;
+    if (d0B < 0.5)
+        d0B = 0.5;
+    d0a = 1.24 * std::pow((xlen + ylen) * 0.5 - 15.0, 1.0 / 3.0) - 1.8;
+    if (d0a < 0.5)
+        d0a = 0.5;
+    if (u_opt)
+    {
+        d0u = 1.24 * std::pow(Lnorm_ass - 15.0, 1.0 / 3.0) - 1.8;
+        if (d0u < 0.5)
+            d0u = 0.5;
     }
 
     TM1 = TM2 = TM3 = TM4 = TM5 = rmsd0 = 0.0;
-    Liden = 0; n_ali8 = 0; n_ali = 0;
+    Liden = 0.0;  // FIX: Reset to absolute 0
+    n_ali8 = 0;
+    n_ali = 0;
     do_vec.clear();
 
     int i_res = 0, j_res = 0;
-    for (size_t r = 0; r < seqxA.length(); r++) {
+    for (size_t r = 0; r < seqxA.length(); r++)
+    {
         bool x_valid = (seqxA[r] != '-');
         bool y_valid = (seqyA[r] != '-');
 
-        if (x_valid && y_valid) {
-            if (seqxA[r] == seqyA[r]) Liden++;
-            
+        if (x_valid && y_valid)
+        {
             int matrix_idx = global_res_tu[i_res];
-            
-            if (matrix_idx >= 0 && matrix_idx < tu_vec.size()) {
+
+            if (matrix_idx >= 0 && matrix_idx < tu_vec.size())
+            {
                 double t_k[3], u_k[3][3];
-                tu2t_u(tu_vec[matrix_idx], t_k, u_k); 
-                
+                tu2t_u(tu_vec[matrix_idx], t_k, u_k);
+
                 double x_rot[3];
-                x_rot[0] = t_k[0] + u_k[0][0]*xa[i_res][0] + u_k[0][1]*xa[i_res][1] + u_k[0][2]*xa[i_res][2];
-                x_rot[1] = t_k[1] + u_k[1][0]*xa[i_res][0] + u_k[1][1]*xa[i_res][1] + u_k[1][2]*xa[i_res][2];
-                x_rot[2] = t_k[2] + u_k[2][0]*xa[i_res][0] + u_k[2][1]*xa[i_res][1] + u_k[2][2]*xa[i_res][2];
+                x_rot[0] = t_k[0] + u_k[0][0] * xa[i_res][0] + u_k[0][1] * xa[i_res][1] + u_k[0][2] * xa[i_res][2];
+                x_rot[1] = t_k[1] + u_k[1][0] * xa[i_res][0] + u_k[1][1] * xa[i_res][1] + u_k[1][2] * xa[i_res][2];
+                x_rot[2] = t_k[2] + u_k[2][0] * xa[i_res][0] + u_k[2][1] * xa[i_res][1] + u_k[2][2] * xa[i_res][2];
 
                 double dist2 = dist(x_rot, ya[j_res]);
-                double d = sqrt(dist2);
-                
+                double d = std::sqrt(dist2);
+
                 TM2 += 1.0 / (1.0 + dist2 / (d0B * d0B));
                 TM1 += 1.0 / (1.0 + dist2 / (d0A * d0A));
-                if (a_opt) TM3 += 1.0 / (1.0 + dist2 / (d0a * d0a));
-                if (u_opt) TM4 += 1.0 / (1.0 + dist2 / (d0u * d0u));
-                if (d_opt) TM5 += 1.0 / (1.0 + dist2 / (d0_scale * d0_scale));
+                if (a_opt)
+                    TM3 += 1.0 / (1.0 + dist2 / (d0a * d0a));
+                if (u_opt)
+                    TM4 += 1.0 / (1.0 + dist2 / (d0u * d0u));
+                if (d_opt)
+                    TM5 += 1.0 / (1.0 + dist2 / (d0_scale * d0_scale));
 
                 n_ali++;
                 do_vec.push_back(d);
-                
-                if (d <= d0_out) {
+
+                if (d <= d0_out)
+                {
                     rmsd0 += dist2;
                     n_ali8++;
+                    
+                    // FIX: ONLY increment Liden if the pair is structurally aligned (d <= d0_out)
+                    // This matches the denominator (n_ali8) used in output_flexalign_results.
+                    if (seqx[i_res] == seqy[j_res])
+                    {
+                        Liden += 1.0;
+                    }
                 }
-            } else {
+            }
+            else
+            {
                 do_vec.push_back(-1);
             }
-        } else {
+        }
+        else
+        {
             do_vec.push_back(-1);
         }
 
-        if (x_valid) i_res++;
-        if (y_valid) j_res++;
+        if (x_valid)
+            i_res++;
+        if (y_valid)
+            j_res++;
     }
 
     TM2 /= xlen;
     TM1 /= ylen;
-    if (a_opt) TM3 /= (xlen + ylen) * 0.5;
-    if (u_opt) TM4 /= Lnorm_ass;
-    if (d_opt) TM5 /= ylen;
-    
-    if (n_ali8 > 0) rmsd0 = sqrt(rmsd0 / n_ali8);
-    else rmsd0 = 0.0;
-    
+    if (a_opt)
+        TM3 /= (xlen + ylen) * 0.5;
+    if (u_opt)
+        TM4 /= Lnorm_ass;
+    if (d_opt)
+        TM5 /= ylen;
+
+    if (n_ali8 > 0)
+        rmsd0 = std::sqrt(rmsd0 / n_ali8);
+    else
+        rmsd0 = 0.0;
+
     L_ali = n_ali;
     TM_ali = TM1;
     rmsd_ali = rmsd0;
 
-    if (!tu_vec.empty()) tu2t_u(tu_vec[0], t0, u0);
+    // Notice: NO Division by L_ali here. We leave it as an absolute count!
+
+    if (!tu_vec.empty())
+        tu2t_u(tu_vec[0], t0, u0);
 
     return tu_vec.size();
 }
