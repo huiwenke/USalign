@@ -2978,6 +2978,7 @@ int flexalign_fatcat_main(double **xa, double **ya,
     int misCut = 2 * fragLen;
     int maxGapFrag = fragLen + max_gap;
     double afp_dis_cut = fragLen * fragLen * (disCut * disCut);
+    int min_block_len = fragLen;
 
     // ==========================================
     // OPTIMIZATION 1: Precompute local intra-protein distance matrices
@@ -3412,8 +3413,13 @@ int flexalign_fatcat_main(double **xa, double **ya,
         }
         if (b_s1 != -1)
         {
-            Region r = {b_s1, b_e1, b_s2, b_e2};
-            real_blocks.push_back(r);
+            int block_len_1 = b_e1 - b_s1;
+            int block_len_2 = b_e2 - b_s2;
+            if (block_len_1 >= min_block_len && block_len_2 >= min_block_len)
+            {
+                Region r = {b_s1, b_e1, b_s2, b_e2};
+                real_blocks.push_back(r);
+            }
         }
     }
     if (real_blocks.empty())
@@ -3526,49 +3532,36 @@ int flexalign_fatcat_main(double **xa, double **ya,
         std::vector<std::vector<double>> tu_vec_best;
 
         bool force_fast_opt = (std::min(L1_sub, L2_sub) > 1500) ? true : fast_opt;
-        
+        std::vector<std::string> local_sequence = sequence;
+
         // Test different secondary structure options (flexalign_best behavior)
         for (int cur_ss_opt = 0; cur_ss_opt <= 1; cur_ss_opt++)
         {
-            double t0_s[3], u0_s[3][3];
-            std::vector<std::vector<double>> tu_vec_s;
-            double TM1_s = 0, TM2_s = 0, TM3_s = 0, TM4_s = 0, TM5_s = 0;
-            double d0_0_s = 0, TM_0_s = 0, d0A_s = 0, d0B_s = 0, d0u_s = 0, d0a_s = 0, d0_out_s = 5.0;
-            std::string seqM_s, seqxA_s, seqyA_s;
-            std::vector<double> do_vec_s;
-            double rmsd0_s = 0;
-            int L_ali_s = 0;
-            double Liden_s = 0;
-            double TM_ali_s = 0, rmsd_ali_s = 0;
-            int n_ali_s = 0, n_ali8_s = 0;
+            FlexAlignResult cur_res;
 
-            flexalign_main(
+            // This ensures that the fallback compensation runs if too few hinges are found.
+            execute_flexalign_with_fallback(
                 xa_sub, ya_sub, seqx_sub, seqy_sub, secx_sub, secy_sub,
-                t0_s, u0_s, tu_vec_s, TM1_s, TM2_s, TM3_s, TM4_s, TM5_s,
-                d0_0_s, TM_0_s, d0A_s, d0B_s, d0u_s, d0a_s, d0_out_s,
-                seqM_s, seqxA_s, seqyA_s, do_vec_s,
-                rmsd0_s, L_ali_s, Liden_s, TM_ali_s, rmsd_ali_s, n_ali_s, n_ali8_s,
-                L1_sub, L2_sub, sequence, Lnorm_ass, d0_scale,
+                L1_sub, L2_sub, local_sequence, Lnorm_ass, d0_scale,
                 i_opt, a_opt, u_opt, d_opt, force_fast_opt,
-                mol_type, hinge_opt, cur_ss_opt);
+                mol_type, hinge_opt, cur_ss_opt, cur_res);
 
-            double cur_max_TM = (TM1_s > TM2_s) ? TM1_s : TM2_s;
+            double cur_max_TM = (cur_res.TM1 > cur_res.TM2) ? cur_res.TM1 : cur_res.TM2;
             if (cur_max_TM > TM_best_max)
             {
                 TM_best_max = cur_max_TM;
                 for (int a = 0; a < 3; a++)
                 {
-                    t0_best[a] = t0_s[a];
+                    t0_best[a] = cur_res.t0[a];
                     for (int b = 0; b < 3; b++)
-                        u0_best[a][b] = u0_s[a][b];
+                        u0_best[a][b] = cur_res.u0[a][b];
                 }
-                seqM_best = seqM_s;
-                seqxA_best = seqxA_s;
-                seqyA_best = seqyA_s;
-                tu_vec_best = tu_vec_s;
+                seqM_best = cur_res.seqM;
+                seqxA_best = cur_res.seqxA;
+                seqyA_best = cur_res.seqyA;
+                tu_vec_best = cur_res.tu_vec;
             }
         }
-
         // If alignment completely failed
         if (TM_best_max < 0)
         {
@@ -3609,8 +3602,8 @@ int flexalign_fatcat_main(double **xa, double **ya,
         }
 
         int rx = x_s;
-        
-        // FIX: current_global_idx must stay outside the character loop 
+
+        // FIX: current_global_idx must stay outside the character loop
         // to maintain the last known state across gaps or unaligned regions
         int current_global_idx = base_tu_idx;
 
@@ -3712,7 +3705,7 @@ int flexalign_fatcat_main(double **xa, double **ya,
     }
 
     TM1 = TM2 = TM3 = TM4 = TM5 = rmsd0 = 0.0;
-    Liden = 0.0;  // FIX: Reset to absolute 0
+    Liden = 0.0; // FIX: Reset to absolute 0
     n_ali8 = 0;
     n_ali = 0;
     do_vec.clear();
@@ -3756,7 +3749,7 @@ int flexalign_fatcat_main(double **xa, double **ya,
                 {
                     rmsd0 += dist2;
                     n_ali8++;
-                    
+
                     // FIX: ONLY increment Liden if the pair is structurally aligned (d <= d0_out)
                     // This matches the denominator (n_ali8) used in output_flexalign_results.
                     if (seqx[i_res] == seqy[j_res])
