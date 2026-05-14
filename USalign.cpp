@@ -2978,7 +2978,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
     int misCut = 2 * fragLen;
     int maxGapFrag = fragLen + max_gap;
     double afp_dis_cut = fragLen * fragLen * (disCut * disCut);
-    int min_block_len = fragLen;
 
     // ==========================================
     // OPTIMIZATION 1: Precompute local intra-protein distance matrices
@@ -3027,7 +3026,7 @@ int flexalign_fatcat_main(double **xa, double **ya,
     {
         for (int j = 0; j <= ylen - fragLen; j += step)
         {
-            int d3_term = std::min(i, j) + std::min(xlen - (i + fragLen), ylen - (j + fragLen)) + fragLen;
+            int d3_term = std::min(i, j) + std::min(xlen - (i + fragLen - 1), ylen - (j + fragLen)) + fragLen;
             if (d3_term < 0.3 * std::min(xlen, ylen))
                 continue;
 
@@ -3161,9 +3160,14 @@ int flexalign_fatcat_main(double **xa, double **ya,
         return 0;
 
     // ==========================================
-    // Step 3: Global Dynamic Programming (DP)
+    // Step 3 & 4: Dual Dynamic Programming and Domain Splitting
+    // We run two competing gap penalty logics:
+    // 1. Original FATCAT (allows overlaps/rewards)
+    // 2. Strict Penalty (penalizes overlaps)
+    // The winner is the one that identifies more rigid domains (blocks).
     // ==========================================
-    // OPTIMIZATION 5: Flat 1D vectors for 2D DP cache
+
+    // OPTIMIZATION 5: Flat 1D vectors for 2D DP cache (Pre-computation)
     std::vector<int> afp_aft_index(xlen * ylen, -1);
     std::vector<int> afp_bef_index(xlen * ylen, -1);
 
@@ -3202,182 +3206,62 @@ int flexalign_fatcat_main(double **xa, double **ya,
         }
     }
 
-    std::vector<double> sco(n_afps);
-    std::vector<int> twi(n_afps, 0);
-    std::vector<int> pre(n_afps, -1);
-    for (int m = 0; m < n_afps; m++)
-        sco[m] = merged_afps[m].score;
-
-    for (int m = 0; m < n_afps; m++)
-    {
-        int curr_i = merged_afps[m].i;
-        int curr_j = merged_afps[m].j;
-        int a3 = curr_i - fragLen;
-        int a2 = std::max(0, a3 - misCut);
-        int a1 = std::max(0, curr_i - maxGapFrag);
-        int b3 = curr_j - fragLen;
-        int b2 = std::max(0, b3 - misCut);
-        int b1 = std::max(0, curr_j - maxGapFrag);
-
-        std::vector<int> valid_prevs;
-        for (int step = 0; step < 2; step++)
-        {
-            int a_s, a_e, b_s, b_e;
-            if (step == 0)
-            {
-                a_s = std::max(a1, 0);
-                a_e = std::min(a3, xlen - 1);
-                b_s = std::max(b2, 0);
-                b_e = std::min(b3, ylen - 1);
-            }
-            else
-            {
-                a_s = std::max(a2, 0);
-                a_e = std::min(a3, xlen - 1);
-                b_s = std::max(b1, 0);
-                b_e = std::min(b2 - 1, ylen - 1);
-            }
-
-            if (b_s >= ylen || b_e < 0)
-                continue;
-            for (int prev_i = a_s; prev_i <= a_e; prev_i++)
-            {
-                int s1 = afp_aft_index[prev_i * ylen + b_s];
-                int s2 = afp_bef_index[prev_i * ylen + b_e];
-                if (s1 != -1 && s2 != -1 && s1 <= s2)
-                {
-                    for (int s = s1; s <= s2; s++)
-                        valid_prevs.push_back(s);
-                }
-            }
-        }
-
-        double curr_sco = merged_afps[m].score;
-        for (size_t v = 0; v < valid_prevs.size(); v++)
-        {
-            int prev = valid_prevs[v];
-            int prev_twi = twi[prev];
-            if (prev_twi > max_twists)
-                continue;
-
-            int gap_i = curr_i - (merged_afps[prev].i + merged_afps[prev].len);
-            int gap_j = curr_j - (merged_afps[prev].j + merged_afps[prev].len);
-            int m_gap = std::max(gap_i, gap_j);
-            int m_mis = 0;
-            if (gap_i < 0 || gap_j < 0)
-                m_mis = (gap_i < gap_j) ? -gap_i : -gap_j;
-
-            double gp = gap_ext * m_mis;
-            if (m_gap > 0)
-                gp += gap_ext * m_gap;
-            if (gp < max_penalty)
-                gp = max_penalty;
-
-            // USE PRECOMPUTED DISTANCES - O(1) inside loop
-            double rms_sq = 0;
-            for (int k = 0; k < fragLen; k++)
-            {
-                for (int l = 0; l < fragLen; l++)
-                {
-                    double dist1, dist2;
-                    int idx1_a = curr_i + k, idx1_b = merged_afps[prev].i + l;
-                    if (idx1_a >= idx1_b)
-                        dist1 = disTable1[idx1_b][idx1_a - idx1_b];
-                    else
-                        dist1 = disTable1[idx1_a][idx1_b - idx1_a];
-
-                    int idx2_a = curr_j + k, idx2_b = merged_afps[prev].j + l;
-                    if (idx2_a >= idx2_b)
-                        dist2 = disTable2[idx2_b][idx2_a - idx2_b];
-                    else
-                        dist2 = disTable2[idx2_a][idx2_b - idx2_a];
-
-                    rms_sq += (dist1 - dist2) * (dist1 - dist2);
-                }
-            }
-
-            double tp = 0.0;
-            int is_twist = 0;
-            if (rms_sq >= afp_dis_cut)
-            {
-                tp = twist_pen;
-                is_twist = 1;
-            }
-            else
-            {
-                double dvar = std::sqrt(rms_sq / (fragLen * fragLen));
-                if (dvar > disCut - disSmooth)
-                    tp = twist_pen * std::sqrt((dvar - disCut + disSmooth) / disSmooth);
-            }
-
-            if (prev_twi + is_twist > max_twists)
-                continue;
-
-            double stmp = sco[prev] + curr_sco + tp + gp;
-            if (stmp > sco[m])
-            {
-                sco[m] = stmp;
-                pre[m] = prev;
-                twi[m] = prev_twi + is_twist;
-            }
-        }
-    }
-
-    int best_m = 0;
-    for (int m = 1; m < n_afps; m++)
-        if (sco[m] > sco[best_m])
-            best_m = m;
-
-    std::vector<int> path;
-    int curr_m = best_m;
-    while (curr_m != -1)
-    {
-        path.push_back(curr_m);
-        curr_m = pre[curr_m];
-    }
-    std::reverse(path.begin(), path.end());
-
-    // ==========================================
-    // Step 4: Split structure based on FATCAT exact heuristics
-    // ==========================================
-
     // Lambda 1: Calculate Distance Variation (dvar) exactly as FATCAT's CalAfpDis
-    auto get_dvar = [&](const FATCAT_AFP& prv, const FATCAT_AFP& curr) -> double {
+    auto get_dvar = [&](const FATCAT_AFP &prv, const FATCAT_AFP &curr) -> double
+    {
         double rms_sq = 0;
-        for (int i_idx = 0; i_idx < fragLen; i_idx++) {
-            for (int j_idx = 0; j_idx < fragLen; j_idx++) {
+        for (int i_idx = 0; i_idx < fragLen; i_idx++)
+        {
+            for (int j_idx = 0; j_idx < fragLen; j_idx++)
+            {
                 double dist1, dist2;
                 int idx1_a = curr.i + i_idx, idx1_b = prv.i + j_idx;
-                if (idx1_a >= idx1_b) dist1 = disTable1[idx1_b][idx1_a - idx1_b];
-                else                  dist1 = disTable1[idx1_a][idx1_b - idx1_a];
+                if (idx1_a >= idx1_b)
+                    dist1 = disTable1[idx1_b][idx1_a - idx1_b];
+                else
+                    dist1 = disTable1[idx1_a][idx1_b - idx1_a];
 
                 int idx2_a = curr.j + i_idx, idx2_b = prv.j + j_idx;
-                if (idx2_a >= idx2_b) dist2 = disTable2[idx2_b][idx2_a - idx2_b];
-                else                  dist2 = disTable2[idx2_a][idx2_b - idx2_a];
+                if (idx2_a >= idx2_b)
+                    dist2 = disTable2[idx2_b][idx2_a - idx2_b];
+                else
+                    dist2 = disTable2[idx2_a][idx2_b - idx2_a];
 
                 rms_sq += (dist1 - dist2) * (dist1 - dist2);
             }
         }
-        if (rms_sq > afp_dis_cut) return 1e9; // Trigger twist
+        if (rms_sq > afp_dis_cut)
+            return 1e9; // Trigger twist
         return std::sqrt(rms_sq / (fragLen * fragLen));
     };
 
     // Lambda 2: Calculate fast rigid-body Kabsch RMSD for a block
-    auto calc_block_rmsd = [&](const std::vector<FATCAT_AFP>& afp_list) -> double {
+    auto calc_block_rmsd = [&](const std::vector<FATCAT_AFP> &afp_list) -> double
+    {
         std::vector<int> r1, r2;
-        for (size_t a = 0; a < afp_list.size(); a++) {
-            for (int l = 0; l < afp_list[a].len; l++) {
+        for (size_t a = 0; a < afp_list.size(); a++)
+        {
+            for (int l = 0; l < afp_list[a].len; l++)
+            {
                 r1.push_back(afp_list[a].i + l);
                 r2.push_back(afp_list[a].j + l);
             }
         }
         int n = r1.size();
-        if (n < 3) return 0.0;
-        double** p1; NewArray(&p1, n, 3);
-        double** p2; NewArray(&p2, n, 3);
-        for(int i = 0; i < n; i++) {
-            p1[i][0] = xa[r1[i]][0]; p1[i][1] = xa[r1[i]][1]; p1[i][2] = xa[r1[i]][2];
-            p2[i][0] = ya[r2[i]][0]; p2[i][1] = ya[r2[i]][1]; p2[i][2] = ya[r2[i]][2];
+        if (n < 3)
+            return 0.0;
+        double **p1;
+        NewArray(&p1, n, 3);
+        double **p2;
+        NewArray(&p2, n, 3);
+        for (int i = 0; i < n; i++)
+        {
+            p1[i][0] = xa[r1[i]][0];
+            p1[i][1] = xa[r1[i]][1];
+            p1[i][2] = xa[r1[i]][2];
+            p2[i][0] = ya[r2[i]][0];
+            p2[i][1] = ya[r2[i]][1];
+            p2[i][2] = ya[r2[i]][2];
         }
         double rms_sq_sum, t_tmp[3], u_tmp[3][3];
         Kabsch(p1, p2, n, 0, &rms_sq_sum, t_tmp, u_tmp);
@@ -3386,187 +3270,394 @@ int flexalign_fatcat_main(double **xa, double **ya,
         return std::sqrt(rms_sq_sum / n);
     };
 
-    // --- Phase 1: Initial AFP Chaining (Simulating FATCAT TraceBack) ---
-    struct Block {
-        std::vector<FATCAT_AFP> afps;
-        std::vector<double> dvars; // records dvar between afps[i-1] and afps[i]
+    struct Region
+    {
+        int s1, e1, s2, e2;
     };
-    std::vector<Block> blocks;
-    Block curr_block;
-    curr_block.afps.push_back(merged_afps[path[0]]);
-    curr_block.dvars.push_back(0.0); // First AFP has no previous connection
 
-    for (size_t k = 1; k < path.size(); k++) {
-        FATCAT_AFP curr = merged_afps[path[k]];
-        FATCAT_AFP prv = merged_afps[path[k - 1]];
-        double dvar = get_dvar(prv, curr);
+    // Lambda 3: The core DP and Splitting logic, taking logic_type as parameter
+    // logic_type 0 = FATCAT original (allows reward), logic_type 1 = Strict Penalty
+    auto run_dp_and_split = [&](int logic_type) -> std::pair<std::vector<int>, std::vector<int>>
+    {
+        std::vector<double> sco(n_afps);
+        std::vector<int> twi(n_afps, 0);
+        std::vector<int> pre(n_afps, -1);
+        for (int m = 0; m < n_afps; m++)
+            sco[m] = merged_afps[m].score;
 
-        if (dvar >= disCut) { // Twist detected, start new block
+        // --- Step 3 Execution ---
+        for (int m = 0; m < n_afps; m++)
+        {
+            int curr_i = merged_afps[m].i;
+            int curr_j = merged_afps[m].j;
+            int a3 = curr_i - fragLen;
+            int a2 = std::max(0, a3 - misCut);
+            int a1 = std::max(0, curr_i - maxGapFrag);
+            int b3 = curr_j - fragLen;
+            int b2 = std::max(0, b3 - misCut);
+            int b1 = std::max(0, curr_j - maxGapFrag);
+
+            std::vector<int> valid_prevs;
+            for (int step = 0; step < 2; step++)
+            {
+                int a_s, a_e, b_s, b_e;
+                if (step == 0)
+                {
+                    a_s = std::max(a1, 0);
+                    a_e = std::min(a3, xlen - 1);
+                    b_s = std::max(b2, 0);
+                    b_e = std::min(b3, ylen - 1);
+                }
+                else
+                {
+                    a_s = std::max(a2, 0);
+                    a_e = std::min(a3, xlen - 1);
+                    b_s = std::max(b1, 0);
+                    b_e = std::min(b2 - 1, ylen - 1);
+                }
+
+                if (b_s >= ylen || b_e < 0)
+                    continue;
+                for (int prev_i = a_s; prev_i <= a_e; prev_i++)
+                {
+                    int s1 = afp_aft_index[prev_i * ylen + b_s];
+                    int s2 = afp_bef_index[prev_i * ylen + b_e];
+                    if (s1 != -1 && s2 != -1 && s1 <= s2)
+                        for (int s = s1; s <= s2; s++)
+                            valid_prevs.push_back(s);
+                }
+            }
+
+            double curr_sco = merged_afps[m].score;
+            for (size_t v = 0; v < valid_prevs.size(); v++)
+            {
+                int prev = valid_prevs[v];
+                int prev_twi = twi[prev];
+                if (prev_twi > max_twists)
+                    continue;
+
+                int gap_i = curr_i - (merged_afps[prev].i + merged_afps[prev].len);
+                int gap_j = curr_j - (merged_afps[prev].j + merged_afps[prev].len);
+                int m_gap = std::max(gap_i, gap_j);
+
+                double gp = 0.0;
+                // SWITCH: Apply different gap penalties based on the chosen logic
+                if (logic_type == 0)
+                {
+                    // FATCAT Original Logic (Reward allowed if m_gap < 0)
+                    gp = gap_ext * m_gap;
+                }
+                else
+                {
+                    // Strict Penalty Logic (No rewards for overlaps)
+                    int m_mis = 0;
+                    if (gap_i < 0 || gap_j < 0)
+                        m_mis = (gap_i < gap_j) ? -gap_i : -gap_j;
+                    gp = gap_ext * m_mis;
+                    if (m_gap > 0)
+                        gp += gap_ext * m_gap;
+                }
+
+                if (gp < max_penalty)
+                    gp = max_penalty;
+
+                // Fast distance variation check
+                double rms_sq = 0;
+                for (int k = 0; k < fragLen; k++)
+                {
+                    for (int l = 0; l < fragLen; l++)
+                    {
+                        double dist1, dist2;
+                        int idx1_a = curr_i + k, idx1_b = merged_afps[prev].i + l;
+                        if (idx1_a >= idx1_b)
+                            dist1 = disTable1[idx1_b][idx1_a - idx1_b];
+                        else
+                            dist1 = disTable1[idx1_a][idx1_b - idx1_a];
+
+                        int idx2_a = curr_j + k, idx2_b = merged_afps[prev].j + l;
+                        if (idx2_a >= idx2_b)
+                            dist2 = disTable2[idx2_b][idx2_a - idx2_b];
+                        else
+                            dist2 = disTable2[idx2_a][idx2_b - idx2_a];
+
+                        rms_sq += (dist1 - dist2) * (dist1 - dist2);
+                    }
+                }
+
+                double tp = 0.0;
+                int is_twist = 0;
+                if (rms_sq >= afp_dis_cut)
+                {
+                    tp = twist_pen;
+                    is_twist = 1;
+                }
+                else
+                {
+                    double dvar = std::sqrt(rms_sq / (fragLen * fragLen));
+                    if (dvar > disCut - disSmooth)
+                        tp = twist_pen * std::sqrt((dvar - disCut + disSmooth) / disSmooth);
+                }
+
+                if (prev_twi + is_twist > max_twists)
+                    continue;
+
+                double stmp = sco[prev] + curr_sco + tp + gp;
+                if (stmp > sco[m])
+                {
+                    sco[m] = stmp;
+                    pre[m] = prev;
+                    twi[m] = prev_twi + is_twist;
+                }
+            }
+        }
+
+        int best_m = 0;
+        for (int m = 1; m < n_afps; m++)
+            if (sco[m] > sco[best_m])
+                best_m = m;
+
+        std::vector<int> path;
+        int curr_m = best_m;
+        while (curr_m != -1)
+        {
+            path.push_back(curr_m);
+            curr_m = pre[curr_m];
+        }
+        std::reverse(path.begin(), path.end());
+
+        // Return empty if no path
+        std::vector<int> b1, b2;
+        if (path.empty())
+            return std::make_pair(b1, b2);
+
+        // --- Step 4 Execution (Block Splitting & Merging) ---
+        struct Block
+        {
+            std::vector<FATCAT_AFP> afps;
+            std::vector<double> dvars;
+        };
+        std::vector<Block> blocks;
+        Block curr_block;
+        curr_block.afps.push_back(merged_afps[path[0]]);
+        curr_block.dvars.push_back(0.0);
+
+        for (size_t k = 1; k < path.size(); k++)
+        {
+            FATCAT_AFP curr = merged_afps[path[k]];
+            FATCAT_AFP prv = merged_afps[path[k - 1]];
+            double dvar = get_dvar(prv, curr);
+
+            if (dvar >= disCut)
+            {
+                blocks.push_back(curr_block);
+                curr_block.afps.clear();
+                curr_block.dvars.clear();
+                curr_block.afps.push_back(curr);
+                curr_block.dvars.push_back(0.0);
+            }
+            else
+            {
+                curr_block.afps.push_back(curr);
+                curr_block.dvars.push_back(dvar);
+            }
+        }
+        if (!curr_block.afps.empty())
             blocks.push_back(curr_block);
-            curr_block.afps.clear();
-            curr_block.dvars.clear();
-            curr_block.afps.push_back(curr);
-            curr_block.dvars.push_back(0.0);
-        } else {
-            curr_block.afps.push_back(curr);
-            curr_block.dvars.push_back(dvar); // Record dvar for SplitBlock later
-        }
-    }
-    if (!curr_block.afps.empty()) blocks.push_back(curr_block);
 
-    double local_badRmsd = 4.0; // FATCAT's defined threshold
+        double local_badRmsd = 4.0;
 
-    // --- Phase 2: SplitBlock (Exact FATCAT Logic) ---
-    // Finds the block with highest RMSD > 4.0 and cuts it at the connection with max dvar
-    bool splitted = true;
-    while (splitted && blocks.size() < (size_t)(max_twists + 1)) {
-        splitted = false;
-        double max_rmsd = 0.0;
-        int target_b = -1;
-        
-        for (size_t b = 0; b < blocks.size(); b++) {
-            if (blocks[b].afps.size() > 2) {
-                double cur_rmsd = calc_block_rmsd(blocks[b].afps);
-                if (cur_rmsd > max_rmsd) {
-                    max_rmsd = cur_rmsd;
-                    target_b = b;
+        // SplitBlock
+        bool splitted = true;
+        while (splitted && blocks.size() < (size_t)(max_twists + 1))
+        {
+            splitted = false;
+            double max_rmsd = 0.0;
+            int target_b = -1;
+
+            for (size_t b = 0; b < blocks.size(); b++)
+            {
+                if (blocks[b].afps.size() > 2)
+                {
+                    double cur_rmsd = calc_block_rmsd(blocks[b].afps);
+                    if (cur_rmsd > max_rmsd)
+                    {
+                        max_rmsd = cur_rmsd;
+                        target_b = b;
+                    }
+                }
+            }
+
+            if (max_rmsd >= local_badRmsd && target_b != -1)
+            {
+                double max_t = 0;
+                int cut_idx = 0;
+                for (size_t i = 1; i < blocks[target_b].afps.size(); i++)
+                {
+                    if (blocks[target_b].dvars[i] > max_t)
+                    {
+                        max_t = blocks[target_b].dvars[i];
+                        cut_idx = i;
+                    }
+                }
+
+                if (cut_idx > 0)
+                {
+                    Block right_blk;
+                    right_blk.afps.assign(blocks[target_b].afps.begin() + cut_idx, blocks[target_b].afps.end());
+                    right_blk.dvars.assign(blocks[target_b].dvars.begin() + cut_idx, blocks[target_b].dvars.end());
+                    right_blk.dvars[0] = 0.0;
+
+                    blocks[target_b].afps.erase(blocks[target_b].afps.begin() + cut_idx, blocks[target_b].afps.end());
+                    blocks[target_b].dvars.erase(blocks[target_b].dvars.begin() + cut_idx, blocks[target_b].dvars.end());
+
+                    blocks.insert(blocks.begin() + target_b + 1, right_blk);
+                    splitted = true;
                 }
             }
         }
-        
-        if (max_rmsd >= local_badRmsd && target_b != -1) {
-            double max_t = 0;
-            int cut_idx = 0;
-            for (size_t i = 1; i < blocks[target_b].afps.size(); i++) {
-                if (blocks[target_b].dvars[i] > max_t) {
-                    max_t = blocks[target_b].dvars[i];
-                    cut_idx = i;
+
+        // DeleteBlock
+        for (int b = 0; b < (int)blocks.size(); b++)
+        {
+            if (blocks[b].afps.size() <= 1)
+            {
+                int e1 = (b < (int)blocks.size() - 1) ? blocks[b + 1].afps.front().i : xlen;
+                int e2 = (b < (int)blocks.size() - 1) ? blocks[b + 1].afps.front().j : ylen;
+                int b1 = (b > 0) ? blocks[b - 1].afps.back().i + blocks[b - 1].afps.back().len : 0;
+                int b2 = (b > 0) ? blocks[b - 1].afps.back().j + blocks[b - 1].afps.back().len : 0;
+                int span = std::min(e1 - b1, e2 - b2);
+                if (span < 2 * fragLen)
+                {
+                    blocks.erase(blocks.begin() + b);
+                    b--;
                 }
             }
-            
-            if (cut_idx > 0) {
-                // Execute split at cut_idx
-                Block right_blk;
-                right_blk.afps.assign(blocks[target_b].afps.begin() + cut_idx, blocks[target_b].afps.end());
-                right_blk.dvars.assign(blocks[target_b].dvars.begin() + cut_idx, blocks[target_b].dvars.end());
-                right_blk.dvars[0] = 0.0; // Clean the break point
-                
-                blocks[target_b].afps.erase(blocks[target_b].afps.begin() + cut_idx, blocks[target_b].afps.end());
-                blocks[target_b].dvars.erase(blocks[target_b].dvars.begin() + cut_idx, blocks[target_b].dvars.end());
-                
-                blocks.insert(blocks.begin() + target_b + 1, right_blk);
-                splitted = true;
+        }
+
+        // MergeBlock
+        bool merged = true;
+        while (merged && blocks.size() > 1)
+        {
+            merged = false;
+            double min_rmsd = 1e9;
+            int min_b = -1;
+            for (size_t b = 0; b < blocks.size() - 1; b++)
+            {
+                std::vector<FATCAT_AFP> temp_merged = blocks[b].afps;
+                temp_merged.insert(temp_merged.end(), blocks[b + 1].afps.begin(), blocks[b + 1].afps.end());
+                double cur_rmsd = calc_block_rmsd(temp_merged);
+                if (cur_rmsd < min_rmsd)
+                {
+                    min_rmsd = cur_rmsd;
+                    min_b = b;
+                }
+            }
+
+            if (min_rmsd < local_badRmsd && min_b != -1)
+            {
+                blocks[min_b].afps.insert(blocks[min_b].afps.end(), blocks[min_b + 1].afps.begin(), blocks[min_b + 1].afps.end());
+                blocks.erase(blocks.begin() + min_b + 1);
+                merged = true;
             }
         }
-    }
 
-    // --- Phase 3: DeleteBlock (Exact FATCAT Logic) ---
-    // Remove isolated single-AFP blocks that don't span enough length
-    for (int b = 0; b < (int)blocks.size(); b++) {
-        if (blocks[b].afps.size() <= 1) {
-            int e1 = (b < (int)blocks.size() - 1) ? blocks[b+1].afps.front().i : xlen;
-            int e2 = (b < (int)blocks.size() - 1) ? blocks[b+1].afps.front().j : ylen;
-            int b1 = (b > 0) ? blocks[b-1].afps.back().i + blocks[b-1].afps.back().len : 0;
-            int b2 = (b > 0) ? blocks[b-1].afps.back().j + blocks[b-1].afps.back().len : 0;
-            int span = std::min(e1 - b1, e2 - b2);
-            if (span < 2 * fragLen) {
-                blocks.erase(blocks.begin() + b);
-                b--; 
+        // Compile contiguous boundaries
+        std::vector<Region> real_blocks;
+        int last_i = 0, last_j = 0;
+        for (size_t b = 0; b < blocks.size(); b++)
+        {
+            int b_s1 = -1, b_e1 = -1, b_s2 = -1, b_e2 = -1;
+            for (size_t a = 0; a < blocks[b].afps.size(); a++)
+            {
+                FATCAT_AFP afp = blocks[b].afps[a];
+                int skip = std::max(std::max(last_i - afp.i, last_j - afp.j), 0);
+                if (skip >= afp.len)
+                    continue;
+
+                int eff_i = afp.i + skip;
+                int eff_j = afp.j + skip;
+                int eff_L = afp.len - skip;
+
+                if (b_s1 == -1)
+                {
+                    b_s1 = eff_i;
+                    b_s2 = eff_j;
+                }
+                b_e1 = eff_i + eff_L;
+                b_e2 = eff_j + eff_L;
+                last_i = b_e1;
+                last_j = b_e2;
             }
-        }
-    }
-
-    // --- Phase 4: MergeBlock (Exact FATCAT Logic) ---
-    // Re-merge adjacent blocks if their combined rigid body RMSD is < 4.0
-    bool merged = true;
-    while (merged && blocks.size() > 1) {
-        merged = false;
-        double min_rmsd = 1e9;
-        int min_b = -1;
-        for (size_t b = 0; b < blocks.size() - 1; b++) {
-            std::vector<FATCAT_AFP> temp_merged = blocks[b].afps;
-            temp_merged.insert(temp_merged.end(), blocks[b+1].afps.begin(), blocks[b+1].afps.end());
-            double cur_rmsd = calc_block_rmsd(temp_merged);
-            if (cur_rmsd < min_rmsd) {
-                min_rmsd = cur_rmsd;
-                min_b = b;
-            }
-        }
-        
-        if (min_rmsd < local_badRmsd && min_b != -1) {
-            blocks[min_b].afps.insert(blocks[min_b].afps.end(), blocks[min_b+1].afps.begin(), blocks[min_b+1].afps.end());
-            blocks.erase(blocks.begin() + min_b + 1);
-            merged = true;
-        }
-    }
-
-    // --- Phase 5: Build strictly contiguous boundaries for Step 5 TM-align ---
-    // Applies US-align's overlap removal (skip) and midpoint boundary assignment
-    struct Region { int s1, e1, s2, e2; };
-    std::vector<Region> real_blocks;
-    int last_i = 0, last_j = 0;
-
-    for (size_t b = 0; b < blocks.size(); b++) {
-        int b_s1 = -1, b_e1 = -1, b_s2 = -1, b_e2 = -1;
-        for (size_t a = 0; a < blocks[b].afps.size(); a++) {
-            FATCAT_AFP afp = blocks[b].afps[a];
-            
-            // Core safety: strip overlaps to ensure monotonicity
-            int skip = std::max(std::max(last_i - afp.i, last_j - afp.j), 0);
-            if (skip >= afp.len) continue;
-
-            int eff_i = afp.i + skip;
-            int eff_j = afp.j + skip;
-            int eff_L = afp.len - skip;
-            
-            if (b_s1 == -1) { b_s1 = eff_i; b_s2 = eff_j; }
-            b_e1 = eff_i + eff_L;
-            b_e2 = eff_j + eff_L;
-            last_i = b_e1;
-            last_j = b_e2;
-        }
-        if (b_s1 != -1) {
-            // Keep block only if its "non-overlapping" core is large enough
-            if (b_e1 - b_s1 >= min_block_len && b_e2 - b_s2 >= min_block_len) {
+            if (b_s1 != -1)
+            {
+                if (b_e1 - b_s1 >= 3 && b_e2 - b_s2 >= 3) {
                 Region r = {b_s1, b_e1, b_s2, b_e2};
                 real_blocks.push_back(r);
+                }
             }
         }
-    }
-    
-    if (real_blocks.empty()) return 0;
+
+        if (real_blocks.empty())
+            return std::make_pair(b1, b2);
+
+        b1.push_back(0);
+        b2.push_back(0);
+        for (size_t k = 0; k < real_blocks.size() - 1; k++)
+        {
+            b1.push_back((real_blocks[k].e1 + real_blocks[k + 1].s1) / 2);
+            b2.push_back((real_blocks[k].e2 + real_blocks[k + 1].s2) / 2);
+        }
+        b1.push_back(xlen);
+        b2.push_back(ylen);
+
+        return std::make_pair(b1, b2);
+    };
+
+    // ==========================================
+    // Run competing strategies and select the winner
+    // ==========================================
+    auto bounds_fatcat = run_dp_and_split(0); // FATCAT Reward Logic
+    auto bounds_strict = run_dp_and_split(1); // Strict Penalty Logic
 
     std::vector<int> bounds1, bounds2;
-    bounds1.push_back(0);
-    bounds2.push_back(0);
-    for (size_t k = 0; k < real_blocks.size() - 1; k++) {
-        // Find exact midpoints between valid, non-overlapping blocks
-        bounds1.push_back((real_blocks[k].e1 + real_blocks[k + 1].s1) / 2);
-        bounds2.push_back((real_blocks[k].e2 + real_blocks[k + 1].s2) / 2);
+    int domains_fatcat = bounds_fatcat.first.empty() ? 0 : bounds_fatcat.first.size() - 1;
+    int domains_strict = bounds_strict.first.empty() ? 0 : bounds_strict.first.size() - 1;
+
+    // We favor the logic that produces a higher number of rigid domains (blocks)
+    if (domains_strict > domains_fatcat)
+    {
+        bounds1 = bounds_strict.first;
+        bounds2 = bounds_strict.second;
     }
-    bounds1.push_back(xlen);
-    bounds2.push_back(ylen);
-    
+    else
+    {
+        bounds1 = bounds_fatcat.first;
+        bounds2 = bounds_fatcat.second;
+    }
+
+    if (bounds1.empty())
+        return 0;
+
     // ==========================================
     // [DEBUG] TEMPORARY DEBUG OUTPUT
     // ==========================================
-    cout << "\n========================================" << endl;
-    cout << "PDB1 Interval: ";
-    for (size_t k = 0; k < bounds1.size() - 1; k++)
-    {
-        cout << (bounds1[k] + 1) << "-" << bounds1[k + 1];
-        if (k < bounds1.size() - 2)
-            cout << ",";
-    }
-    cout << "\nPDB2 Interval: ";
-    for (size_t k = 0; k < bounds2.size() - 1; k++)
-    {
-        cout << (bounds2[k] + 1) << "-" << bounds2[k + 1];
-        if (k < bounds2.size() - 2)
-            cout << ",";
-    }
-    cout << "\n========================================\n"
-         << endl;
+    // cout << "\n========================================" << endl;
+    // cout << "PDB1 Interval: ";
+    // for (size_t k = 0; k < bounds1.size() - 1; k++)
+    // {
+    //     cout << (bounds1[k] + 1) << "-" << bounds1[k + 1];
+    //     if (k < bounds1.size() - 2)
+    //         cout << ",";
+    // }
+    // cout << "\nPDB2 Interval: ";
+    // for (size_t k = 0; k < bounds2.size() - 1; k++)
+    // {
+    //     cout << (bounds2[k] + 1) << "-" << bounds2[k + 1];
+    //     if (k < bounds2.size() - 2)
+    //         cout << ",";
+    // }
+    // cout << "\n========================================\n"
+    //      << endl;
 
     // ==========================================
     // Step 5: Iteratively align each block using TRUE flexalign_best logic
