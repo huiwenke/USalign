@@ -2981,7 +2981,7 @@ int flexalign_fatcat_main(double **xa, double **ya,
 
     // ==========================================
     // OPTIMIZATION 1: Precompute local intra-protein distance matrices
-    // This entirely eliminates the costly sqrt() calls inside the O(N^2 * fragLen^2) DP loop.
+    // Utilizes basic_fun.h dist() function to replace manual distance calculation
     // ==========================================
     int max_dist_window = max_gap + 2 * fragLen + 1;
     std::vector<std::vector<double>> disTable1(xlen, std::vector<double>(max_dist_window, 0.0));
@@ -2991,20 +2991,16 @@ int flexalign_fatcat_main(double **xa, double **ya,
     {
         for (int j = i; j < std::min(xlen, i + max_dist_window); j++)
         {
-            double dx = xa[i][0] - xa[j][0];
-            double dy = xa[i][1] - xa[j][1];
-            double dz = xa[i][2] - xa[j][2];
-            disTable1[i][j - i] = std::sqrt(dx * dx + dy * dy + dz * dz);
+            // Use dist() from basic_fun.h which computes squared distance
+            disTable1[i][j - i] = std::sqrt(dist(xa[i], xa[j]));
         }
     }
     for (int i = 0; i < ylen; i++)
     {
         for (int j = i; j < std::min(ylen, i + max_dist_window); j++)
         {
-            double dx = ya[i][0] - ya[j][0];
-            double dy = ya[i][1] - ya[j][1];
-            double dz = ya[i][2] - ya[j][2];
-            disTable2[i][j - i] = std::sqrt(dx * dx + dy * dy + dz * dz);
+            // Use dist() from basic_fun.h
+            disTable2[i][j - i] = std::sqrt(dist(ya[i], ya[j]));
         }
     }
 
@@ -3071,7 +3067,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
     // ==========================================
     // Step 2: Merge diagonal AFPs
     // ==========================================
-    // OPTIMIZATION 2: Flat vector instead of std::map
     int max_diagonal_idx = xlen + ylen + 1;
     std::vector<std::vector<FATCAT_AFP>> diagonals(max_diagonal_idx);
     for (size_t k = 0; k < initial_afps.size(); k++)
@@ -3080,8 +3075,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
     }
 
     std::vector<FATCAT_AFP> merged_afps;
-
-    // OPTIMIZATION 4: Pre-allocate max buffers for merge checking
     int max_merge_len = std::min(xlen, ylen);
     double **r1_merge, **r2_merge;
     NewArray(&r1_merge, max_merge_len, 3);
@@ -3093,7 +3086,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
             continue;
         std::vector<FATCAT_AFP> &group = diagonals[d];
 
-        // OPTIMIZATION 3: O(N log N) std::sort instead of O(N^2) loops
         std::sort(group.begin(), group.end(), [](const FATCAT_AFP &a, const FATCAT_AFP &b)
                   { return a.i < b.i; });
 
@@ -3114,7 +3106,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
                 {
                     int new_len = (nxt.i + nxt.len) - curr.i;
 
-                    // Directly use pre-allocated buffers
                     for (int k = 0; k < new_len; k++)
                     {
                         r1_merge[k][0] = xa[curr.i + k][0];
@@ -3149,7 +3140,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
     DeleteArray(&r1_merge, max_merge_len);
     DeleteArray(&r2_merge, max_merge_len);
 
-    // Sort final merged afps
     std::sort(merged_afps.begin(), merged_afps.end(), [](const FATCAT_AFP &a, const FATCAT_AFP &b)
               {
         if (a.i == b.i) return a.j < b.j;
@@ -3161,17 +3151,10 @@ int flexalign_fatcat_main(double **xa, double **ya,
 
     // ==========================================
     // Step 3 & 4: Dual Dynamic Programming and Domain Splitting
-    // We run two competing gap penalty logics:
-    // 1. Original FATCAT (allows overlaps/rewards)
-    // 2. Strict Penalty (penalizes overlaps)
-    // The winner is the one that identifies more rigid domains (blocks).
     // ==========================================
-
-    // OPTIMIZATION 5: Flat 1D vectors for 2D DP cache (Pre-computation)
     std::vector<int> afp_aft_index(xlen * ylen, -1);
     std::vector<int> afp_bef_index(xlen * ylen, -1);
 
-    // Flat mapping instead of std::map
     std::vector<std::vector<std::pair<int, int>>> i_to_j(xlen);
     for (int m = 0; m < n_afps; m++)
     {
@@ -3206,7 +3189,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
         }
     }
 
-    // Lambda 1: Calculate Distance Variation (dvar) exactly as FATCAT's CalAfpDis
     auto get_dvar = [&](const FATCAT_AFP &prv, const FATCAT_AFP &curr) -> double
     {
         double rms_sq = 0;
@@ -3231,11 +3213,10 @@ int flexalign_fatcat_main(double **xa, double **ya,
             }
         }
         if (rms_sq > afp_dis_cut)
-            return 1e9; // Trigger twist
+            return 1e9;
         return std::sqrt(rms_sq / (fragLen * fragLen));
     };
 
-    // Lambda 2: Calculate fast rigid-body Kabsch RMSD for a block
     auto calc_block_rmsd = [&](const std::vector<FATCAT_AFP> &afp_list) -> double
     {
         std::vector<int> r1, r2;
@@ -3275,8 +3256,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
         int s1, e1, s2, e2;
     };
 
-    // Lambda 3: The core DP and Splitting logic, taking logic_type as parameter
-    // logic_type 0 = FATCAT original (allows reward), logic_type 1 = Strict Penalty
     auto run_dp_and_split = [&](int logic_type) -> std::pair<std::vector<int>, std::vector<int>>
     {
         std::vector<double> sco(n_afps);
@@ -3285,7 +3264,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
         for (int m = 0; m < n_afps; m++)
             sco[m] = merged_afps[m].score;
 
-        // --- Step 3 Execution ---
         for (int m = 0; m < n_afps; m++)
         {
             int curr_i = merged_afps[m].i;
@@ -3341,15 +3319,12 @@ int flexalign_fatcat_main(double **xa, double **ya,
                 int m_gap = std::max(gap_i, gap_j);
 
                 double gp = 0.0;
-                // SWITCH: Apply different gap penalties based on the chosen logic
                 if (logic_type == 0)
                 {
-                    // FATCAT Original Logic (Reward allowed if m_gap < 0)
                     gp = gap_ext * m_gap;
                 }
                 else
                 {
-                    // Strict Penalty Logic (No rewards for overlaps)
                     int m_mis = 0;
                     if (gap_i < 0 || gap_j < 0)
                         m_mis = (gap_i < gap_j) ? -gap_i : -gap_j;
@@ -3361,7 +3336,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
                 if (gp < max_penalty)
                     gp = max_penalty;
 
-                // Fast distance variation check
                 double rms_sq = 0;
                 for (int k = 0; k < fragLen; k++)
                 {
@@ -3425,12 +3399,10 @@ int flexalign_fatcat_main(double **xa, double **ya,
         }
         std::reverse(path.begin(), path.end());
 
-        // Return empty if no path
         std::vector<int> b1, b2;
         if (path.empty())
             return std::make_pair(b1, b2);
 
-        // --- Step 4 Execution (Block Splitting & Merging) ---
         struct Block
         {
             std::vector<FATCAT_AFP> afps;
@@ -3466,7 +3438,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
 
         double local_badRmsd = 4.0;
 
-        // SplitBlock
         bool splitted = true;
         while (splitted && blocks.size() < (size_t)(max_twists + 1))
         {
@@ -3516,7 +3487,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
             }
         }
 
-        // DeleteBlock
         for (int b = 0; b < (int)blocks.size(); b++)
         {
             if (blocks[b].afps.size() <= 1)
@@ -3534,7 +3504,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
             }
         }
 
-        // MergeBlock
         bool merged = true;
         while (merged && blocks.size() > 1)
         {
@@ -3561,7 +3530,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
             }
         }
 
-        // Compile contiguous boundaries
         std::vector<Region> real_blocks;
         int last_i = 0, last_j = 0;
         for (size_t b = 0; b < blocks.size(); b++)
@@ -3613,17 +3581,13 @@ int flexalign_fatcat_main(double **xa, double **ya,
         return std::make_pair(b1, b2);
     };
 
-    // ==========================================
-    // Run competing strategies and select the winner
-    // ==========================================
-    auto bounds_fatcat = run_dp_and_split(0); // FATCAT Reward Logic
-    auto bounds_strict = run_dp_and_split(1); // Strict Penalty Logic
+    auto bounds_fatcat = run_dp_and_split(0);
+    auto bounds_strict = run_dp_and_split(1);
 
     std::vector<int> bounds1, bounds2;
     int domains_fatcat = bounds_fatcat.first.empty() ? 0 : bounds_fatcat.first.size() - 1;
     int domains_strict = bounds_strict.first.empty() ? 0 : bounds_strict.first.size() - 1;
 
-    // We favor the logic that produces a higher number of rigid domains (blocks)
     if (domains_strict > domains_fatcat)
     {
         bounds1 = bounds_strict.first;
@@ -3639,31 +3603,9 @@ int flexalign_fatcat_main(double **xa, double **ya,
         return 0;
 
     // ==========================================
-    // [DEBUG] TEMPORARY DEBUG OUTPUT
-    // ==========================================
-    // cout << "\n========================================" << endl;
-    // cout << "PDB1 Interval: ";
-    // for (size_t k = 0; k < bounds1.size() - 1; k++)
-    // {
-    //     cout << (bounds1[k] + 1) << "-" << bounds1[k + 1];
-    //     if (k < bounds1.size() - 2)
-    //         cout << ",";
-    // }
-    // cout << "\nPDB2 Interval: ";
-    // for (size_t k = 0; k < bounds2.size() - 1; k++)
-    // {
-    //     cout << (bounds2[k] + 1) << "-" << bounds2[k + 1];
-    //     if (k < bounds2.size() - 2)
-    //         cout << ",";
-    // }
-    // cout << "\n========================================\n"
-    //      << endl;
-
-    // ==========================================
     // Step 5: Iteratively align each block using TRUE flexalign_best logic
     // ==========================================
     std::string global_seqM = "", global_seqxA = "", global_seqyA = "";
-    // OPTIMIZATION 6: String capacity reservation to avoid reallocation overhead
     global_seqM.reserve(xlen + ylen + max_gap);
     global_seqxA.reserve(xlen + ylen + max_gap);
     global_seqyA.reserve(xlen + ylen + max_gap);
@@ -3678,7 +3620,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
         int L1_sub = x_e - x_s;
         int L2_sub = y_e - y_s;
 
-        // If the sub-region is too short, just fill with gaps
         if (L1_sub < 3 || L2_sub < 3)
         {
             for (int i = 0; i < L1_sub; i++)
@@ -3696,7 +3637,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
             continue;
         }
 
-        // Allocate memory for sub-structures
         double **xa_sub, **ya_sub;
         NewArray(&xa_sub, L1_sub, 3);
         NewArray(&ya_sub, L2_sub, 3);
@@ -3705,7 +3645,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
         char *secx_sub = new char[L1_sub + 1];
         char *secy_sub = new char[L2_sub + 1];
 
-        // Copy data for structure 1
         for (int i = 0; i < L1_sub; i++)
         {
             xa_sub[i][0] = xa[x_s + i][0];
@@ -3717,7 +3656,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
         seqx_sub[L1_sub] = '\0';
         secx_sub[L1_sub] = '\0';
 
-        // Copy data for structure 2
         for (int i = 0; i < L2_sub; i++)
         {
             ya_sub[i][0] = ya[y_s + i][0];
@@ -3729,7 +3667,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
         seqy_sub[L2_sub] = '\0';
         secy_sub[L2_sub] = '\0';
 
-        // Variables to store the best results for this sub-block
         double t0_best[3], u0_best[3][3];
         double TM_best_max = -1.0;
         std::string seqM_best, seqxA_best, seqyA_best;
@@ -3738,12 +3675,10 @@ int flexalign_fatcat_main(double **xa, double **ya,
         bool force_fast_opt = (std::min(L1_sub, L2_sub) > 1500) ? true : fast_opt;
         std::vector<std::string> local_sequence = sequence;
 
-        // Test different secondary structure options (flexalign_best behavior)
         for (int cur_ss_opt = 0; cur_ss_opt <= 1; cur_ss_opt++)
         {
             FlexAlignResult cur_res;
 
-            // This ensures that the fallback compensation runs if too few hinges are found.
             execute_flexalign_with_fallback(
                 xa_sub, ya_sub, seqx_sub, seqy_sub, secx_sub, secy_sub,
                 L1_sub, L2_sub, local_sequence, Lnorm_ass, d0_scale,
@@ -3766,7 +3701,7 @@ int flexalign_fatcat_main(double **xa, double **ya,
                 tu_vec_best = cur_res.tu_vec;
             }
         }
-        // If alignment completely failed
+
         if (TM_best_max < 0)
         {
             for (int i = 0; i < L1_sub; i++)
@@ -3790,7 +3725,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
             continue;
         }
 
-        // Ensure we have at least one valid transform matrix
         if (tu_vec_best.empty())
         {
             std::vector<double> tu_tmp(12);
@@ -3798,7 +3732,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
             tu_vec_best.push_back(tu_tmp);
         }
 
-        // Incorporate local transformation matrices into the global list
         int base_tu_idx = tu_vec.size();
         for (size_t m = 0; m < tu_vec_best.size(); m++)
         {
@@ -3806,17 +3739,12 @@ int flexalign_fatcat_main(double **xa, double **ya,
         }
 
         int rx = x_s;
-
-        // FIX: current_global_idx must stay outside the character loop
-        // to maintain the last known state across gaps or unaligned regions
         int current_global_idx = base_tu_idx;
 
         for (size_t i = 0; i < seqxA_best.length(); i++)
         {
             char c = seqM_best[i];
 
-            // Parse US-align standard hinge characters to update current global matrix index
-            // Valid hinge chars are '0'-'9', 'a'-'z', 'A'-'Z'. Exclude spaces and weak alignment chars.
             if (c != ' ' && c != '.' && c != ':')
             {
                 int local_hinge_idx = -1;
@@ -3827,24 +3755,20 @@ int flexalign_fatcat_main(double **xa, double **ya,
                 else if (c >= 'A' && c <= 'Z')
                     local_hinge_idx = c - 'A' + 36;
 
-                // Safely update the global index tracking
                 if (local_hinge_idx >= 0 && local_hinge_idx < tu_vec_best.size())
                 {
                     current_global_idx = base_tu_idx + local_hinge_idx;
                 }
             }
 
-            // Assign the corresponding rotation matrix index to the original residue
             if (seqxA_best[i] != '-')
             {
                 global_res_tu[rx] = current_global_idx;
                 rx++;
             }
 
-            // Construct the final stitched string format correctly
             if (seqxA_best[i] != '-' && seqyA_best[i] != '-')
             {
-                // Only assign a global hinge character if the local alignment considered it a true match
                 if (c != ' ' && c != '.' && c != ':')
                 {
                     char global_c;
@@ -3855,28 +3779,25 @@ int flexalign_fatcat_main(double **xa, double **ya,
                     else if (current_global_idx < 62)
                         global_c = 'A' + (current_global_idx - 36);
                     else
-                        global_c = '*'; // Fallback if hinges exceed 62
+                        global_c = '*';
 
                     seqM_best[i] = global_c;
                 }
                 else
                 {
-                    // Preserve weak matches ('.' or ':') or spaces
                     seqM_best[i] = c;
                 }
             }
             else
             {
-                seqM_best[i] = ' '; // Ensure gap positions correctly get space
+                seqM_best[i] = ' '; 
             }
         }
 
-        // Append to the global alignment strings
         global_seqM += seqM_best;
         global_seqxA += seqxA_best;
         global_seqyA += seqyA_best;
 
-        // Clean up sub-block memory
         DeleteArray(&xa_sub, L1_sub);
         DeleteArray(&ya_sub, L2_sub);
         delete[] seqx_sub;
@@ -3887,6 +3808,7 @@ int flexalign_fatcat_main(double **xa, double **ya,
 
     // ==========================================
     // Step 6: Recalculate global metrics correctly
+    // Utilizing basic_fun.h transform() and dist() functions for matrix rotations and distance
     // ==========================================
     seqM = global_seqM;
     seqxA = global_seqxA;
@@ -3909,7 +3831,7 @@ int flexalign_fatcat_main(double **xa, double **ya,
     }
 
     TM1 = TM2 = TM3 = TM4 = TM5 = rmsd0 = 0.0;
-    Liden = 0.0; // FIX: Reset to absolute 0
+    Liden = 0.0; 
     n_ali8 = 0;
     n_ali = 0;
     do_vec.clear();
@@ -3929,11 +3851,11 @@ int flexalign_fatcat_main(double **xa, double **ya,
                 double t_k[3], u_k[3][3];
                 tu2t_u(tu_vec[matrix_idx], t_k, u_k);
 
+                // Use the transform() from basic_fun.h
                 double x_rot[3];
-                x_rot[0] = t_k[0] + u_k[0][0] * xa[i_res][0] + u_k[0][1] * xa[i_res][1] + u_k[0][2] * xa[i_res][2];
-                x_rot[1] = t_k[1] + u_k[1][0] * xa[i_res][0] + u_k[1][1] * xa[i_res][1] + u_k[1][2] * xa[i_res][2];
-                x_rot[2] = t_k[2] + u_k[2][0] * xa[i_res][0] + u_k[2][1] * xa[i_res][1] + u_k[2][2] * xa[i_res][2];
+                transform(t_k, u_k, xa[i_res], x_rot);
 
+                // Use the dist() from basic_fun.h
                 double dist2 = dist(x_rot, ya[j_res]);
                 double d = std::sqrt(dist2);
 
@@ -3954,8 +3876,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
                     rmsd0 += dist2;
                     n_ali8++;
 
-                    // FIX: ONLY increment Liden if the pair is structurally aligned (d <= d0_out)
-                    // This matches the denominator (n_ali8) used in output_flexalign_results.
                     if (seqx[i_res] == seqy[j_res])
                     {
                         Liden += 1.0;
@@ -3995,8 +3915,6 @@ int flexalign_fatcat_main(double **xa, double **ya,
     L_ali = n_ali;
     TM_ali = TM1;
     rmsd_ali = rmsd0;
-
-    // Notice: NO Division by L_ali here. We leave it as an absolute count!
 
     if (!tu_vec.empty())
         tu2t_u(tu_vec[0], t0, u0);
