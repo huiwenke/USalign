@@ -3584,340 +3584,409 @@ int flexalign_fatcat_main(double **xa, double **ya,
     auto bounds_fatcat = run_dp_and_split(0);
     auto bounds_strict = run_dp_and_split(1);
 
-    std::vector<int> bounds1, bounds2;
-    int domains_fatcat = bounds_fatcat.first.empty() ? 0 : bounds_fatcat.first.size() - 1;
-    int domains_strict = bounds_strict.first.empty() ? 0 : bounds_strict.first.size() - 1;
-
-    if (domains_strict > domains_fatcat)
-    {
-        bounds1 = bounds_strict.first;
-        bounds2 = bounds_strict.second;
-    }
-    else
-    {
-        bounds1 = bounds_fatcat.first;
-        bounds2 = bounds_fatcat.second;
-    }
-
-    if (bounds1.empty())
-        return 0;
-
     // ==========================================
-    // Step 5: Iteratively align each block using TRUE flexalign_best logic
+    // NEW LOGIC: Run through both sets of bounds (fatcat and strict)
+    // Calculate final TM-scores for both, and select the one with the higher TM-score.
     // ==========================================
-    std::string global_seqM = "", global_seqxA = "", global_seqyA = "";
-    global_seqM.reserve(xlen + ylen + max_gap);
-    global_seqxA.reserve(xlen + ylen + max_gap);
-    global_seqyA.reserve(xlen + ylen + max_gap);
-
-    tu_vec.clear();
-    std::vector<int> global_res_tu(xlen, -1);
-
-    for (size_t k = 0; k < bounds1.size() - 1; k++)
+    std::vector<std::pair<std::vector<int>, std::vector<int>>> all_bounds;
+    
+    // Add the loose logic bounds
+    all_bounds.push_back(bounds_fatcat);
+    
+    // Add the strict logic bounds only if they differ from the loose one to save computation time
+    if (bounds_strict.first != bounds_fatcat.first || bounds_strict.second != bounds_fatcat.second)
     {
-        int x_s = bounds1[k], x_e = bounds1[k + 1];
-        int y_s = bounds2[k], y_e = bounds2[k + 1];
-        int L1_sub = x_e - x_s;
-        int L2_sub = y_e - y_s;
+        all_bounds.push_back(bounds_strict);
+    }
 
-        if (L1_sub < 3 || L2_sub < 3)
+    // Variables to store the best global metrics across all tested bounds
+    double best_global_max_TM = -1.0;
+    std::vector<std::vector<double>> best_tu_vec;
+    double best_t0[3], best_u0[3][3];
+    double best_TM1 = 0.0, best_TM2 = 0.0, best_TM3 = 0.0, best_TM4 = 0.0, best_TM5 = 0.0;
+    double best_rmsd0 = 0.0, best_Liden = 0.0, best_TM_ali = 0.0, best_rmsd_ali = 0.0;
+    int best_L_ali = 0, best_n_ali = 0, best_n_ali8 = 0;
+    std::string best_seqM = "", best_seqxA = "", best_seqyA = "";
+    std::vector<double> best_do_vec;
+    
+    // To store best normalization factors
+    double best_d0A = 0.0, best_d0B = 0.0, best_d0a = 0.0, best_d0u = 0.0;
+
+    // Loop through both bound sets
+    for (size_t b_idx = 0; b_idx < all_bounds.size(); b_idx++)
+    {
+        std::vector<int>& bounds1 = all_bounds[b_idx].first;
+        std::vector<int>& bounds2 = all_bounds[b_idx].second;
+
+        // Skip if no valid bounds were found in this logic
+        if (bounds1.empty()) continue;
+
+        // ==========================================
+        // Step 5: Iteratively align each block using TRUE flexalign_best logic
+        // ==========================================
+        std::string cur_global_seqM = "", cur_global_seqxA = "", cur_global_seqyA = "";
+        cur_global_seqM.reserve(xlen + ylen + max_gap);
+        cur_global_seqxA.reserve(xlen + ylen + max_gap);
+        cur_global_seqyA.reserve(xlen + ylen + max_gap);
+
+        std::vector<std::vector<double>> cur_tu_vec;
+        std::vector<int> cur_global_res_tu(xlen, -1);
+
+        for (size_t k = 0; k < bounds1.size() - 1; k++)
         {
-            for (int i = 0; i < L1_sub; i++)
+            int x_s = bounds1[k], x_e = bounds1[k + 1];
+            int y_s = bounds2[k], y_e = bounds2[k + 1];
+            int L1_sub = x_e - x_s;
+            int L2_sub = y_e - y_s;
+
+            // If the block is too short, just assign gaps
+            if (L1_sub < 3 || L2_sub < 3)
             {
-                global_seqxA += seqx[x_s + i];
-                global_seqyA += '-';
-                global_seqM += ' ';
-            }
-            for (int i = 0; i < L2_sub; i++)
-            {
-                global_seqxA += '-';
-                global_seqyA += seqy[y_s + i];
-                global_seqM += ' ';
-            }
-            continue;
-        }
-
-        double **xa_sub, **ya_sub;
-        NewArray(&xa_sub, L1_sub, 3);
-        NewArray(&ya_sub, L2_sub, 3);
-        char *seqx_sub = new char[L1_sub + 1];
-        char *seqy_sub = new char[L2_sub + 1];
-        char *secx_sub = new char[L1_sub + 1];
-        char *secy_sub = new char[L2_sub + 1];
-
-        for (int i = 0; i < L1_sub; i++)
-        {
-            xa_sub[i][0] = xa[x_s + i][0];
-            xa_sub[i][1] = xa[x_s + i][1];
-            xa_sub[i][2] = xa[x_s + i][2];
-            seqx_sub[i] = seqx[x_s + i];
-            secx_sub[i] = secx[x_s + i];
-        }
-        seqx_sub[L1_sub] = '\0';
-        secx_sub[L1_sub] = '\0';
-
-        for (int i = 0; i < L2_sub; i++)
-        {
-            ya_sub[i][0] = ya[y_s + i][0];
-            ya_sub[i][1] = ya[y_s + i][1];
-            ya_sub[i][2] = ya[y_s + i][2];
-            seqy_sub[i] = seqy[y_s + i];
-            secy_sub[i] = secy[y_s + i];
-        }
-        seqy_sub[L2_sub] = '\0';
-        secy_sub[L2_sub] = '\0';
-
-        double t0_best[3], u0_best[3][3];
-        double TM_best_max = -1.0;
-        std::string seqM_best, seqxA_best, seqyA_best;
-        std::vector<std::vector<double>> tu_vec_best;
-
-        bool force_fast_opt = (std::min(L1_sub, L2_sub) > 1500) ? true : fast_opt;
-        std::vector<std::string> local_sequence = sequence;
-
-        for (int cur_ss_opt = 0; cur_ss_opt <= 1; cur_ss_opt++)
-        {
-            FlexAlignResult cur_res;
-
-            execute_flexalign_with_fallback(
-                xa_sub, ya_sub, seqx_sub, seqy_sub, secx_sub, secy_sub,
-                L1_sub, L2_sub, local_sequence, Lnorm_ass, d0_scale,
-                i_opt, a_opt, u_opt, d_opt, force_fast_opt,
-                mol_type, hinge_opt, cur_ss_opt, cur_res);
-
-            double cur_max_TM = (cur_res.TM1 > cur_res.TM2) ? cur_res.TM1 : cur_res.TM2;
-            if (cur_max_TM > TM_best_max)
-            {
-                TM_best_max = cur_max_TM;
-                for (int a = 0; a < 3; a++)
+                for (int i = 0; i < L1_sub; i++)
                 {
-                    t0_best[a] = cur_res.t0[a];
-                    for (int b = 0; b < 3; b++)
-                        u0_best[a][b] = cur_res.u0[a][b];
+                    cur_global_seqxA += seqx[x_s + i];
+                    cur_global_seqyA += '-';
+                    cur_global_seqM += ' ';
                 }
-                seqM_best = cur_res.seqM;
-                seqxA_best = cur_res.seqxA;
-                seqyA_best = cur_res.seqyA;
-                tu_vec_best = cur_res.tu_vec;
+                for (int i = 0; i < L2_sub; i++)
+                {
+                    cur_global_seqxA += '-';
+                    cur_global_seqyA += seqy[y_s + i];
+                    cur_global_seqM += ' ';
+                }
+                continue;
             }
-        }
 
-        if (TM_best_max < 0)
-        {
+            // Extract sub-sequences and coordinates
+            double **xa_sub, **ya_sub;
+            NewArray(&xa_sub, L1_sub, 3);
+            NewArray(&ya_sub, L2_sub, 3);
+            char *seqx_sub = new char[L1_sub + 1];
+            char *seqy_sub = new char[L2_sub + 1];
+            char *secx_sub = new char[L1_sub + 1];
+            char *secy_sub = new char[L2_sub + 1];
+
             for (int i = 0; i < L1_sub; i++)
             {
-                global_seqxA += seqx_sub[i];
-                global_seqyA += '-';
-                global_seqM += ' ';
+                xa_sub[i][0] = xa[x_s + i][0];
+                xa_sub[i][1] = xa[x_s + i][1];
+                xa_sub[i][2] = xa[x_s + i][2];
+                seqx_sub[i] = seqx[x_s + i];
+                secx_sub[i] = secx[x_s + i];
             }
+            seqx_sub[L1_sub] = '\0';
+            secx_sub[L1_sub] = '\0';
+
             for (int i = 0; i < L2_sub; i++)
             {
-                global_seqxA += '-';
-                global_seqyA += seqy_sub[i];
-                global_seqM += ' ';
+                ya_sub[i][0] = ya[y_s + i][0];
+                ya_sub[i][1] = ya[y_s + i][1];
+                ya_sub[i][2] = ya[y_s + i][2];
+                seqy_sub[i] = seqy[y_s + i];
+                secy_sub[i] = secy[y_s + i];
             }
+            seqy_sub[L2_sub] = '\0';
+            secy_sub[L2_sub] = '\0';
+
+            double t0_best[3], u0_best[3][3];
+            double TM_best_max = -1.0;
+            std::string seqM_best, seqxA_best, seqyA_best;
+            std::vector<std::vector<double>> tu_vec_best;
+
+            bool force_fast_opt = (std::min(L1_sub, L2_sub) > 1500) ? true : fast_opt;
+            std::vector<std::string> local_sequence = sequence;
+
+            // Iterate over Secondary Structure optimization choices
+            for (int cur_ss_opt = 0; cur_ss_opt <= 1; cur_ss_opt++)
+            {
+                FlexAlignResult cur_res;
+
+                execute_flexalign_with_fallback(
+                    xa_sub, ya_sub, seqx_sub, seqy_sub, secx_sub, secy_sub,
+                    L1_sub, L2_sub, local_sequence, Lnorm_ass, d0_scale,
+                    i_opt, a_opt, u_opt, d_opt, force_fast_opt,
+                    mol_type, hinge_opt, cur_ss_opt, cur_res);
+
+                double cur_max_TM = (cur_res.TM1 > cur_res.TM2) ? cur_res.TM1 : cur_res.TM2;
+                if (cur_max_TM > TM_best_max)
+                {
+                    TM_best_max = cur_max_TM;
+                    for (int a = 0; a < 3; a++)
+                    {
+                        t0_best[a] = cur_res.t0[a];
+                        for (int b = 0; b < 3; b++)
+                            u0_best[a][b] = cur_res.u0[a][b];
+                    }
+                    seqM_best = cur_res.seqM;
+                    seqxA_best = cur_res.seqxA;
+                    seqyA_best = cur_res.seqyA;
+                    tu_vec_best = cur_res.tu_vec;
+                }
+            }
+
+            // Fallback for current block
+            if (TM_best_max < 0)
+            {
+                for (int i = 0; i < L1_sub; i++)
+                {
+                    cur_global_seqxA += seqx_sub[i];
+                    cur_global_seqyA += '-';
+                    cur_global_seqM += ' ';
+                }
+                for (int i = 0; i < L2_sub; i++)
+                {
+                    cur_global_seqxA += '-';
+                    cur_global_seqyA += seqy_sub[i];
+                    cur_global_seqM += ' ';
+                }
+                DeleteArray(&xa_sub, L1_sub);
+                DeleteArray(&ya_sub, L2_sub);
+                delete[] seqx_sub;
+                delete[] seqy_sub;
+                delete[] secx_sub;
+                delete[] secy_sub;
+                continue;
+            }
+
+            // Ensure tu_vec_best is populated
+            if (tu_vec_best.empty())
+            {
+                std::vector<double> tu_tmp(12);
+                t_u2tu(t0_best, u0_best, tu_tmp);
+                tu_vec_best.push_back(tu_tmp);
+            }
+
+            int base_tu_idx = cur_tu_vec.size();
+            for (size_t m = 0; m < tu_vec_best.size(); m++)
+            {
+                cur_tu_vec.push_back(tu_vec_best[m]);
+            }
+
+            int rx = x_s;
+            int current_global_idx = base_tu_idx;
+
+            // Merge current block sequences to the global sequence
+            for (size_t i = 0; i < seqxA_best.length(); i++)
+            {
+                char c = seqM_best[i];
+
+                if (c != ' ' && c != '.' && c != ':')
+                {
+                    int local_hinge_idx = -1;
+                    if (c >= '0' && c <= '9')
+                        local_hinge_idx = c - '0';
+                    else if (c >= 'a' && c <= 'z')
+                        local_hinge_idx = c - 'a' + 10;
+                    else if (c >= 'A' && c <= 'Z')
+                        local_hinge_idx = c - 'A' + 36;
+
+                    if (local_hinge_idx >= 0 && local_hinge_idx < tu_vec_best.size())
+                    {
+                        current_global_idx = base_tu_idx + local_hinge_idx;
+                    }
+                }
+
+                if (seqxA_best[i] != '-')
+                {
+                    cur_global_res_tu[rx] = current_global_idx;
+                    rx++;
+                }
+
+                if (seqxA_best[i] != '-' && seqyA_best[i] != '-')
+                {
+                    if (c != ' ' && c != '.' && c != ':')
+                    {
+                        char global_c;
+                        if (current_global_idx < 10)
+                            global_c = '0' + current_global_idx;
+                        else if (current_global_idx < 36)
+                            global_c = 'a' + (current_global_idx - 10);
+                        else if (current_global_idx < 62)
+                            global_c = 'A' + (current_global_idx - 36);
+                        else
+                            global_c = '*';
+
+                        seqM_best[i] = global_c;
+                    }
+                    else
+                    {
+                        seqM_best[i] = c;
+                    }
+                }
+                else
+                {
+                    seqM_best[i] = ' '; 
+                }
+            }
+
+            cur_global_seqM += seqM_best;
+            cur_global_seqxA += seqxA_best;
+            cur_global_seqyA += seqyA_best;
+
             DeleteArray(&xa_sub, L1_sub);
             DeleteArray(&ya_sub, L2_sub);
             delete[] seqx_sub;
             delete[] seqy_sub;
             delete[] secx_sub;
             delete[] secy_sub;
-            continue;
         }
 
-        if (tu_vec_best.empty())
+        // ==========================================
+        // Step 6: Recalculate global metrics correctly for current DP boundary
+        // Utilizing basic_fun.h transform() and dist() functions for matrix rotations and distance
+        // ==========================================
+        double cur_d0A = 1.24 * std::pow(ylen * 1.0 - 15.0, 1.0 / 3.0) - 1.8;
+        if (cur_d0A < 0.5) cur_d0A = 0.5;
+        double cur_d0B = 1.24 * std::pow(xlen * 1.0 - 15.0, 1.0 / 3.0) - 1.8;
+        if (cur_d0B < 0.5) cur_d0B = 0.5;
+        double cur_d0a = 1.24 * std::pow((xlen + ylen) * 0.5 - 15.0, 1.0 / 3.0) - 1.8;
+        if (cur_d0a < 0.5) cur_d0a = 0.5;
+        
+        double cur_d0u = 0.0;
+        if (u_opt)
         {
-            std::vector<double> tu_tmp(12);
-            t_u2tu(t0_best, u0_best, tu_tmp);
-            tu_vec_best.push_back(tu_tmp);
+            cur_d0u = 1.24 * std::pow(Lnorm_ass - 15.0, 1.0 / 3.0) - 1.8;
+            if (cur_d0u < 0.5) cur_d0u = 0.5;
         }
 
-        int base_tu_idx = tu_vec.size();
-        for (size_t m = 0; m < tu_vec_best.size(); m++)
+        double cur_TM1 = 0.0, cur_TM2 = 0.0, cur_TM3 = 0.0, cur_TM4 = 0.0, cur_TM5 = 0.0;
+        double cur_rmsd0 = 0.0, cur_Liden = 0.0;
+        int cur_n_ali8 = 0, cur_n_ali = 0;
+        std::vector<double> cur_do_vec;
+
+        int i_res = 0, j_res = 0;
+        for (size_t r = 0; r < cur_global_seqxA.length(); r++)
         {
-            tu_vec.push_back(tu_vec_best[m]);
-        }
+            bool x_valid = (cur_global_seqxA[r] != '-');
+            bool y_valid = (cur_global_seqyA[r] != '-');
 
-        int rx = x_s;
-        int current_global_idx = base_tu_idx;
-
-        for (size_t i = 0; i < seqxA_best.length(); i++)
-        {
-            char c = seqM_best[i];
-
-            if (c != ' ' && c != '.' && c != ':')
+            if (x_valid && y_valid)
             {
-                int local_hinge_idx = -1;
-                if (c >= '0' && c <= '9')
-                    local_hinge_idx = c - '0';
-                else if (c >= 'a' && c <= 'z')
-                    local_hinge_idx = c - 'a' + 10;
-                else if (c >= 'A' && c <= 'Z')
-                    local_hinge_idx = c - 'A' + 36;
+                int matrix_idx = cur_global_res_tu[i_res];
 
-                if (local_hinge_idx >= 0 && local_hinge_idx < tu_vec_best.size())
+                if (matrix_idx >= 0 && matrix_idx < cur_tu_vec.size())
                 {
-                    current_global_idx = base_tu_idx + local_hinge_idx;
-                }
-            }
+                    double t_k[3], u_k[3][3];
+                    tu2t_u(cur_tu_vec[matrix_idx], t_k, u_k);
 
-            if (seqxA_best[i] != '-')
-            {
-                global_res_tu[rx] = current_global_idx;
-                rx++;
-            }
+                    // Use the transform() and dist() from basic_fun.h
+                    double x_rot[3];
+                    transform(t_k, u_k, xa[i_res], x_rot);
+                    double dist2 = dist(x_rot, ya[j_res]);
+                    double d = std::sqrt(dist2);
 
-            if (seqxA_best[i] != '-' && seqyA_best[i] != '-')
-            {
-                if (c != ' ' && c != '.' && c != ':')
-                {
-                    char global_c;
-                    if (current_global_idx < 10)
-                        global_c = '0' + current_global_idx;
-                    else if (current_global_idx < 36)
-                        global_c = 'a' + (current_global_idx - 10);
-                    else if (current_global_idx < 62)
-                        global_c = 'A' + (current_global_idx - 36);
-                    else
-                        global_c = '*';
+                    cur_TM2 += 1.0 / (1.0 + dist2 / (cur_d0B * cur_d0B));
+                    cur_TM1 += 1.0 / (1.0 + dist2 / (cur_d0A * cur_d0A));
+                    if (a_opt) cur_TM3 += 1.0 / (1.0 + dist2 / (cur_d0a * cur_d0a));
+                    if (u_opt) cur_TM4 += 1.0 / (1.0 + dist2 / (cur_d0u * cur_d0u));
+                    if (d_opt) cur_TM5 += 1.0 / (1.0 + dist2 / (d0_scale * d0_scale));
 
-                    seqM_best[i] = global_c;
+                    cur_n_ali++;
+                    cur_do_vec.push_back(d);
+
+                    if (d <= d0_out)
+                    {
+                        cur_rmsd0 += dist2;
+                        cur_n_ali8++;
+
+                        if (seqx[i_res] == seqy[j_res])
+                        {
+                            cur_Liden += 1.0;
+                        }
+                    }
                 }
                 else
                 {
-                    seqM_best[i] = c;
+                    cur_do_vec.push_back(-1);
                 }
             }
             else
             {
-                seqM_best[i] = ' '; 
+                cur_do_vec.push_back(-1);
             }
+
+            if (x_valid) i_res++;
+            if (y_valid) j_res++;
         }
 
-        global_seqM += seqM_best;
-        global_seqxA += seqxA_best;
-        global_seqyA += seqyA_best;
+        // Normalize TM-scores
+        cur_TM2 /= xlen;
+        cur_TM1 /= ylen;
+        if (a_opt) cur_TM3 /= (xlen + ylen) * 0.5;
+        if (u_opt) cur_TM4 /= Lnorm_ass;
+        if (d_opt) cur_TM5 /= ylen;
 
-        DeleteArray(&xa_sub, L1_sub);
-        DeleteArray(&ya_sub, L2_sub);
-        delete[] seqx_sub;
-        delete[] seqy_sub;
-        delete[] secx_sub;
-        delete[] secy_sub;
-    }
-
-    // ==========================================
-    // Step 6: Recalculate global metrics correctly
-    // Utilizing basic_fun.h transform() and dist() functions for matrix rotations and distance
-    // ==========================================
-    seqM = global_seqM;
-    seqxA = global_seqxA;
-    seqyA = global_seqyA;
-
-    d0A = 1.24 * std::pow(ylen * 1.0 - 15.0, 1.0 / 3.0) - 1.8;
-    if (d0A < 0.5)
-        d0A = 0.5;
-    d0B = 1.24 * std::pow(xlen * 1.0 - 15.0, 1.0 / 3.0) - 1.8;
-    if (d0B < 0.5)
-        d0B = 0.5;
-    d0a = 1.24 * std::pow((xlen + ylen) * 0.5 - 15.0, 1.0 / 3.0) - 1.8;
-    if (d0a < 0.5)
-        d0a = 0.5;
-    if (u_opt)
-    {
-        d0u = 1.24 * std::pow(Lnorm_ass - 15.0, 1.0 / 3.0) - 1.8;
-        if (d0u < 0.5)
-            d0u = 0.5;
-    }
-
-    TM1 = TM2 = TM3 = TM4 = TM5 = rmsd0 = 0.0;
-    Liden = 0.0; 
-    n_ali8 = 0;
-    n_ali = 0;
-    do_vec.clear();
-
-    int i_res = 0, j_res = 0;
-    for (size_t r = 0; r < seqxA.length(); r++)
-    {
-        bool x_valid = (seqxA[r] != '-');
-        bool y_valid = (seqyA[r] != '-');
-
-        if (x_valid && y_valid)
-        {
-            int matrix_idx = global_res_tu[i_res];
-
-            if (matrix_idx >= 0 && matrix_idx < tu_vec.size())
-            {
-                double t_k[3], u_k[3][3];
-                tu2t_u(tu_vec[matrix_idx], t_k, u_k);
-
-                // Use the transform() from basic_fun.h
-                double x_rot[3];
-                transform(t_k, u_k, xa[i_res], x_rot);
-
-                // Use the dist() from basic_fun.h
-                double dist2 = dist(x_rot, ya[j_res]);
-                double d = std::sqrt(dist2);
-
-                TM2 += 1.0 / (1.0 + dist2 / (d0B * d0B));
-                TM1 += 1.0 / (1.0 + dist2 / (d0A * d0A));
-                if (a_opt)
-                    TM3 += 1.0 / (1.0 + dist2 / (d0a * d0a));
-                if (u_opt)
-                    TM4 += 1.0 / (1.0 + dist2 / (d0u * d0u));
-                if (d_opt)
-                    TM5 += 1.0 / (1.0 + dist2 / (d0_scale * d0_scale));
-
-                n_ali++;
-                do_vec.push_back(d);
-
-                if (d <= d0_out)
-                {
-                    rmsd0 += dist2;
-                    n_ali8++;
-
-                    if (seqx[i_res] == seqy[j_res])
-                    {
-                        Liden += 1.0;
-                    }
-                }
-            }
-            else
-            {
-                do_vec.push_back(-1);
-            }
-        }
+        if (cur_n_ali8 > 0)
+            cur_rmsd0 = std::sqrt(cur_rmsd0 / cur_n_ali8);
         else
-        {
-            do_vec.push_back(-1);
-        }
+            cur_rmsd0 = 0.0;
 
-        if (x_valid)
-            i_res++;
-        if (y_valid)
-            j_res++;
+        // Compare the current iteration against the best found so far
+        double cur_global_max_TM = (cur_TM1 > cur_TM2) ? cur_TM1 : cur_TM2;
+
+        if (cur_global_max_TM > best_global_max_TM)
+        {
+            best_global_max_TM = cur_global_max_TM;
+            best_tu_vec = cur_tu_vec;
+            best_TM1 = cur_TM1;
+            best_TM2 = cur_TM2;
+            best_TM3 = cur_TM3;
+            best_TM4 = cur_TM4;
+            best_TM5 = cur_TM5;
+            best_rmsd0 = cur_rmsd0;
+            best_Liden = cur_Liden;
+            best_TM_ali = cur_TM1;
+            best_rmsd_ali = cur_rmsd0;
+            best_L_ali = cur_n_ali;
+            best_n_ali = cur_n_ali;
+            best_n_ali8 = cur_n_ali8;
+            best_seqM = cur_global_seqM;
+            best_seqxA = cur_global_seqxA;
+            best_seqyA = cur_global_seqyA;
+            best_do_vec = cur_do_vec;
+            
+            best_d0A = cur_d0A;
+            best_d0B = cur_d0B;
+            best_d0a = cur_d0a;
+            best_d0u = cur_d0u;
+
+            if (!best_tu_vec.empty()) {
+                tu2t_u(best_tu_vec[0], best_t0, best_u0);
+            }
+        }
     }
 
-    TM2 /= xlen;
-    TM1 /= ylen;
-    if (a_opt)
-        TM3 /= (xlen + ylen) * 0.5;
-    if (u_opt)
-        TM4 /= Lnorm_ass;
-    if (d_opt)
-        TM5 /= ylen;
+    // Safety check if both attempts somehow failed
+    if (best_global_max_TM < 0) return 0;
 
-    if (n_ali8 > 0)
-        rmsd0 = std::sqrt(rmsd0 / n_ali8);
-    else
-        rmsd0 = 0.0;
+    // Output best values back to the reference parameters
+    TM1 = best_TM1;
+    TM2 = best_TM2;
+    TM3 = best_TM3;
+    TM4 = best_TM4;
+    TM5 = best_TM5;
+    rmsd0 = best_rmsd0;
+    Liden = best_Liden;
+    TM_ali = best_TM_ali;
+    rmsd_ali = best_rmsd_ali;
+    L_ali = best_L_ali;
+    n_ali = best_n_ali;
+    n_ali8 = best_n_ali8;
+    seqM = best_seqM;
+    seqxA = best_seqxA;
+    seqyA = best_seqyA;
+    do_vec = best_do_vec;
+    tu_vec = best_tu_vec;
+    
+    d0A = best_d0A;
+    d0B = best_d0B;
+    d0a = best_d0a;
+    d0u = best_d0u;
 
-    L_ali = n_ali;
-    TM_ali = TM1;
-    rmsd_ali = rmsd0;
-
-    if (!tu_vec.empty())
-        tu2t_u(tu_vec[0], t0, u0);
+    for (int a = 0; a < 3; a++) {
+        t0[a] = best_t0[a];
+        for (int b = 0; b < 3; b++) u0[a][b] = best_u0[a][b];
+    }
 
     return tu_vec.size();
 }
