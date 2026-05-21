@@ -3622,6 +3622,23 @@ int flexalign_fatcat_main(double **xa, double **ya,
         if (bounds1.empty()) continue;
 
         // ==========================================
+        // INSERT NEW DEBUG CODE HERE
+        // ==========================================
+        // DEBUG: Print the end-to-end continuous regions sent to flexalign
+        // std::cout << "DEBUG (Mode " << (b_idx == 0 ? "FATCAT" : "STRICT") << "): "
+        //           << "Sequence partitioned into " << bounds1.size() - 1 << " continuous sub-regions.\n";
+        // for (size_t k = 0; k < bounds1.size() - 1; k++) {
+        //     int L1_sub = bounds1[k + 1] - bounds1[k];
+        //     int L2_sub = bounds2[k + 1] - bounds2[k];
+        //     bool will_skip = (L1_sub < 3 || L2_sub < 3);
+        //     std::cout << "  Sub-region " << k + 1 << ": "
+        //               << "Seq1 [" << bounds1[k] << " to " << bounds1[k + 1] << ") <-> "
+        //               << "Seq2 [" << bounds2[k] << " to " << bounds2[k + 1] << ") "
+        //               << (will_skip ? "[SKIPPED: fill gaps]" : "[SENT TO flexalign]") << "\n";
+        // }
+        // ==========================================
+
+        // ==========================================
         // Step 5: Iteratively align each block using TRUE flexalign_best logic
         // ==========================================
         std::string cur_global_seqM = "", cur_global_seqxA = "", cur_global_seqyA = "";
