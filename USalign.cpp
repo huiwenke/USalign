@@ -91,8 +91,8 @@ void print_extra_help()
             //"\n"
             //" -closeK  Number of closest atoms used for sequence order independent\n"
             //"          initial alignment. default: 5\n"
-            //"\n"
-            //" -hinge   Maximum number of hinge allowed in flexible alignment. default: 9\n"
+            "\n"
+            " -hinge   Maximum number of hinge allowed in flexible alignment. default: 9\n"
             "\n"
             "   -se    Do not perform superposition. Useful for extracting alignment from\n"
             "          superposed structure pairs\n"
@@ -2972,12 +2972,13 @@ int flexalign_fatcat_main(double **xa, double **ya,
     double disCut = 5.0;
     double disSmooth = 4.0;
     double twist_pen = -25.0;
-    int max_twists = 9;
     int max_gap = 40;
     double max_penalty = -5.0;
     int misCut = 2 * fragLen;
     int maxGapFrag = fragLen + max_gap;
     double afp_dis_cut = fragLen * fragLen * (disCut * disCut);
+
+    int max_twists = hinge_opt;
 
     // ==========================================
     // OPTIMIZATION 1: Precompute local intra-protein distance matrices
@@ -4794,7 +4795,7 @@ int main(int argc, char *argv[])
             closeK_opt = 0;
     }
 
-    if (mm_opt == 7 && hinge_opt >= 10)
+    if (mm_opt >= 7 && hinge_opt >= 10)
         PrintErrorAndQuit("ERROR! -hinge must be <10");
 
     if (chainmapfile.size() && mm_opt != 1)
