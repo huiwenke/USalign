@@ -2165,7 +2165,7 @@ void execute_flexalign_with_fallback(
             xa, ya, seqx, seqy, secx, secy,
             res_h.t0, res_h.u0, res_h.tu_vec,
             res_h.TM1, res_h.TM2, res_h.TM3, res_h.TM4, res_h.TM5,
-            res_h.d0_0, res_h.TM_0, res.d0A, res.d0B, res.d0u, res.d0a, res_h.d0_out,
+            res_h.d0_0, res_h.TM_0, res_h.d0A, res_h.d0B, res_h.d0u, res_h.d0a, res_h.d0_out,
             res_h.seqM, res_h.seqxA, res_h.seqyA, res_h.do_vec,
             res_h.rmsd0, res_h.L_ali, res_h.Liden, res_h.TM_ali, res_h.rmsd_ali,
             res_h.n_ali, res_h.n_ali8,
