@@ -2296,15 +2296,13 @@ void output_flexalign_pymol(const string xname, const string yname,
             for (i = 1; i < chainID1.size(); i++)
                 if (chainID1[i] == ',')
                     break;
-            c1 = chainID1.substr(i + 1);
-            
+            if (chainID1.substr(i+1)!="_")
+                chain1_sele = " and c. " + chainID1.substr(i + 1);
             for (i = 1; i < chainID2.size(); i++)
                 if (chainID2[i] == ',')
                     break;
-            c2 = chainID2.substr(i + 1);
-            
-            chain1_sele = " and c. " + (c1 == "_" || c1 == " " || c1 == "" ? "''" : c1);
-            chain2_sele = " and c. " + (c1 == "_" || c2 == " " || c2 == "" ? "''" : c2);
+            if (chainID2.substr(i+1)!="_")
+                chain2_sele = " and c. " + chainID2.substr(i + 1);
         }
     }
 
@@ -2312,7 +2310,6 @@ void output_flexalign_pymol(const string xname, const string yname,
     int i1 = -1;
     int i2 = -1;
     int num_hinges = tu_vec.size(); // Total number of rigid bodies (hinges)
-    
     // Arrays to store selections and bonds separately for each hinge
     vector<string> resi1_sele(num_hinges, "");
     vector<string> resi2_sele(num_hinges, "");
@@ -2334,7 +2331,6 @@ void output_flexalign_pymol(const string xname, const string yname,
             i1 += (seqxA[i] != '-' && seqxA[i] != '*');
             i2 += (seqyA[i] != '-');
             if (seqM[i] == ' ' || seqxA[i] == '*') continue;
-            
             curr_resi1 = resi_vec1[i1].substr(0, 4);
             curr_resi2 = resi_vec2[i2].substr(0, 4);
 
@@ -2344,7 +2340,6 @@ void output_flexalign_pymol(const string xname, const string yname,
             if (hinge_char >= '0' && hinge_char <= '9') hinge_idx = hinge_char - '0';
             else if (hinge_char >= 'a' && hinge_char <= 'z') hinge_idx = hinge_char - 'a' + 10;
             else if (hinge_char >= 'A' && hinge_char <= 'Z') hinge_idx = hinge_char - 'A' + 36;
-            
             // Safety check to prevent index out of bounds
             if (hinge_idx >= num_hinges) hinge_idx = num_hinges - 1;
 
@@ -2354,22 +2349,22 @@ void output_flexalign_pymol(const string xname, const string yname,
             {
                 resi1_sele[hinge_idx] += " or i. " + curr_resi1;
                 resi1_bond[hinge_idx] += "bond structure1 and i. " + prev_resi1[hinge_idx] +
-                                         ", i. " + curr_resi1 + "\n";
+                              ", i. " + curr_resi1 + "\n";
             }
-            
+
             if (resi2_sele[hinge_idx].size() == 0)
                 resi2_sele[hinge_idx] = "i. " + curr_resi2;
             else
             {
                 resi2_sele[hinge_idx] += " or i. " + curr_resi2;
                 resi2_bond[hinge_idx] += "bond structure2 and i. " + prev_resi2[hinge_idx] +
-                                         ", i. " + curr_resi2 + "\n";
+                              ", i. " + curr_resi2 + "\n";
             }
-            
+
             prev_resi1[hinge_idx] = curr_resi1;
             prev_resi2[hinge_idx] = curr_resi2;
         }
-        
+
         // Wrap final selections in parentheses
         for (int h = 0; h < num_hinges; h++)
         {
@@ -2405,7 +2400,6 @@ void output_flexalign_pymol(const string xname, const string yname,
             << "cmd.load(\"" << yname << "\", \"structure2\")\n"
             << "hide all\n"
             << "set all_states, " << ((ter_opt == 0) ? "on" : "off") << '\n';
-            
         if (p == 0) // .pml
         {
             if (chain1_sele.size())
@@ -2413,7 +2407,6 @@ void output_flexalign_pymol(const string xname, const string yname,
             if (chain2_sele.size())
                 buf_pymol << "remove structure2 and not " << chain2_sele.substr(4) << "\n";
             buf_pymol << "remove not n. CA and not n. C3'\n";
-            
             // Add bonds for each hinge
             for (int h = 0; h < num_hinges; h++) {
                 buf_pymol << resi1_bond[h] << resi2_bond[h];
