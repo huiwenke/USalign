@@ -703,6 +703,498 @@ void output_flexalign_rotation_matrix(const char *fname_matrix,
     ss.str(string());
 }
 
+void output_flexalign_chimerax(const string xname, const string yname,
+                               const string fname_super, const vector<vector<double> > &tu_vec,
+                               double t[3], double u[3][3], const int ter_opt,
+                               const int mm_opt, const int split_opt, const int mirror_opt,
+                               const char *seqM, const char *seqxA, const char *seqyA,
+                               const vector<string> &resi_vec1, const vector<string> &resi_vec2,
+                               const string chainID1, const string chainID2)
+{
+    int compress_type = 0; // uncompressed file
+    ifstream fin;
+#ifndef REDI_PSTREAM_H_SEEN
+    ifstream fin_gz;
+#else
+    redi::ipstream fin_gz; // if file is compressed
+    if (xname.size() >= 3 &&
+        xname.substr(xname.size() - 3, 3) == ".gz")
+    {
+        fin_gz.open("gunzip -c " + xname);
+        compress_type = 1;
+    }
+    else if (xname.size() >= 4 &&
+             xname.substr(xname.size() - 4, 4) == ".bz2")
+    {
+        fin_gz.open("bzcat " + xname);
+        compress_type = 2;
+    }
+    else
+#endif
+    fin.open(xname.c_str());
+
+    map<string, int> resi2hinge_dict;
+    int r, i, j;
+    j = -1;
+    char hinge_char = 0;
+    int xlen = resi_vec1.size();
+    int ali_len = strlen(seqM);
+    for (r = 0; r < strlen(seqxA); r++)
+    {
+        if (seqxA[r] == '-')
+            continue;
+        j++;
+        hinge_char = seqM[r];
+        if (hinge_char == ' ')
+        {
+            for (i = 1; i < ali_len; i++)
+            {
+                if (r - i >= 0 && seqM[r - i] != ' ')
+                    hinge_char = seqM[r - i];
+                else if (r + i < xlen && seqM[r + i] != ' ')
+                    hinge_char = seqM[r + i];
+                if (hinge_char != ' ')
+                    break;
+            }
+        }
+        int hinge_idx = 0;
+        if (hinge_char >= '0' && hinge_char <= '9')
+        {
+            hinge_idx = hinge_char - '0';
+        }
+        else if (hinge_char >= 'a' && hinge_char <= 'z')
+        {
+            hinge_idx = hinge_char - 'a' + 10;
+        }
+        else if (hinge_char >= 'A' && hinge_char <= 'Z')
+        {
+            hinge_idx = hinge_char - 'A' + 36;
+        }
+        resi2hinge_dict[resi_vec1[j]] = hinge_idx;
+    }
+    string resi = resi_vec1[0];
+    int read_resi = resi.size() - 4;
+
+    stringstream buf;
+    stringstream buf_cxc;
+    string line;
+    double x[3];  // before transform
+    double x1[3]; // after transform
+
+    /* for PDBx/mmCIF only */
+    map<string, int> _atom_site;
+    size_t atom_site_pos;
+    vector<string> line_vec;
+    int infmt = -1; // 0 - PDB, 3 - PDBx/mmCIF
+    int hinge = 0;
+    string asym_id = "."; 
+    
+    while (compress_type ? fin_gz.good() : fin.good())
+    {
+        if (compress_type)
+            getline(fin_gz, line);
+        else
+            getline(fin, line);
+        if (line.compare(0, 6, "ATOM  ") == 0 ||
+            line.compare(0, 6, "HETATM") == 0) // PDB format
+        {
+            infmt = 0;
+            x[0] = atof(line.substr(30, 8).c_str());
+            x[1] = atof(line.substr(38, 8).c_str());
+            x[2] = atof(line.substr(46, 8).c_str());
+            if (mirror_opt)
+                x[2] = -x[2];
+            if (read_resi == 1)
+                resi = line.substr(22, 5);
+            else
+                resi = line.substr(22, 5) + line[21];
+            hinge = 0;
+            if (resi2hinge_dict.count(resi))
+                hinge = resi2hinge_dict[resi];
+            tu2t_u(tu_vec[hinge], t, u);
+            transform(t, u, x, x1);
+            buf << line.substr(0, 30) << setiosflags(ios::fixed)
+                << setprecision(3)
+                << setw(8) << x1[0] << setw(8) << x1[1] << setw(8) << x1[2]
+                << line.substr(54) << '\n';
+        }
+        else if (line.compare(0, 5, "loop_") == 0) // PDBx/mmCIF
+        {
+            infmt = 3;
+            buf << line << '\n';
+            while (1)
+            {
+                if (compress_type)
+                {
+                    if (fin_gz.good())
+                        getline(fin_gz, line);
+                    else
+                        PrintErrorAndQuit("ERROR! Unexpected end of " + xname);
+                }
+                else
+                {
+                    if (fin.good())
+                        getline(fin, line);
+                    else
+                        PrintErrorAndQuit("ERROR! Unexpected end of " + xname);
+                }
+                if (line.size())
+                    break;
+            }
+            buf << line << '\n';
+            if (line.compare(0, 11, "_atom_site."))
+                continue;
+            _atom_site.clear();
+            atom_site_pos = 0;
+            _atom_site[Trim(line.substr(11))] = atom_site_pos;
+            while (1)
+            {
+                while (1)
+                {
+                    if (compress_type)
+                    {
+                        if (fin_gz.good())
+                            getline(fin_gz, line);
+                        else
+                            PrintErrorAndQuit("ERROR! Unexpected end of " + xname);
+                    }
+                    else
+                    {
+                        if (fin.good())
+                            getline(fin, line);
+                        else
+                            PrintErrorAndQuit("ERROR! Unexpected end of " + xname);
+                    }
+                    if (line.size())
+                        break;
+                }
+                if (line.compare(0, 11, "_atom_site."))
+                    break;
+                _atom_site[Trim(line.substr(11))] = ++atom_site_pos;
+                buf << line << '\n';
+            }
+
+            if (_atom_site.count("group_PDB") *
+                    _atom_site.count("Cartn_x") *
+                    _atom_site.count("Cartn_y") *
+                    _atom_site.count("Cartn_z") ==
+                0)
+            {
+                buf << line << '\n';
+                cerr << "Warning! Missing one of the following _atom_site data items: group_PDB, Cartn_x, Cartn_y, Cartn_z" << endl;
+                continue;
+            }
+
+            while (1)
+            {
+                line_vec.clear();
+                split(line, line_vec);
+                if (line_vec[_atom_site["group_PDB"]] != "ATOM" &&
+                    line_vec[_atom_site["group_PDB"]] != "HETATM")
+                    break;
+
+                x[0] = atof(line_vec[_atom_site["Cartn_x"]].c_str());
+                x[1] = atof(line_vec[_atom_site["Cartn_y"]].c_str());
+                x[2] = atof(line_vec[_atom_site["Cartn_z"]].c_str());
+                if (mirror_opt)
+                    x[2] = -x[2];
+
+                if (_atom_site.count("auth_seq_id"))
+                    resi = line_vec[_atom_site["auth_seq_id"]];
+                else
+                    resi = line_vec[_atom_site["label_seq_id"]];
+                if (_atom_site.count("pdbx_PDB_ins_code") &&
+                    line_vec[_atom_site["pdbx_PDB_ins_code"]] != "?")
+                    resi += line_vec[_atom_site["pdbx_PDB_ins_code"]][0];
+                else
+                    resi += " ";
+                if (read_resi >= 2)
+                {
+                    if (_atom_site.count("auth_asym_id"))
+                        asym_id = line_vec[_atom_site["auth_asym_id"]];
+                    else
+                        asym_id = line_vec[_atom_site["label_asym_id"]];
+                    if (asym_id == ".")
+                        asym_id = " ";
+                    resi += asym_id[0];
+                }
+                hinge = 0;
+                if (resi2hinge_dict.count(resi))
+                    hinge = resi2hinge_dict[resi];
+                tu2t_u(tu_vec[hinge], t, u);
+                transform(t, u, x, x1);
+
+                for (atom_site_pos = 0; atom_site_pos < _atom_site.size(); atom_site_pos++)
+                {
+                    if (atom_site_pos == _atom_site["Cartn_x"])
+                        buf << setiosflags(ios::fixed) << setprecision(3)
+                            << setw(8) << x1[0] << ' ';
+                    else if (atom_site_pos == _atom_site["Cartn_y"])
+                        buf << setiosflags(ios::fixed) << setprecision(3)
+                            << setw(8) << x1[1] << ' ';
+                    else if (atom_site_pos == _atom_site["Cartn_z"])
+                        buf << setiosflags(ios::fixed) << setprecision(3)
+                            << setw(8) << x1[2] << ' ';
+                    else
+                        buf << line_vec[atom_site_pos] << ' ';
+                }
+                buf << '\n';
+
+                if (compress_type && fin_gz.good())
+                    getline(fin_gz, line);
+                else if (!compress_type && fin.good())
+                    getline(fin, line);
+                else
+                    break;
+            }
+            if (compress_type ? fin_gz.good() : fin.good())
+                buf << line << '\n';
+        }
+        else if (line.size())
+        {
+            buf << line << '\n';
+            if (ter_opt >= 1 && line.compare(0, 3, "END") == 0)
+                break;
+        }
+    }
+    if (compress_type)
+        fin_gz.close();
+    else
+        fin.close();
+
+    string fname_super_full = fname_super;
+    if (infmt == 0)
+        fname_super_full += ".pdb";
+    else if (infmt == 3)
+        fname_super_full += ".cif";
+    ofstream fp;
+    fp.open(fname_super_full.c_str());
+    fp << buf.str();
+    fp.close();
+    buf.str(string()); // clear stream
+
+    string chain1_sele = "";
+    string chain2_sele = "";
+    if (!mm_opt)
+    {
+        if (split_opt == 2 && ter_opt >= 1) // align one chain from model 1
+        {
+            string c1 = chainID1.substr(1);
+            string c2 = chainID2.substr(1);
+            if (c1 != "_" && c1 != " " && c1 != "") chain1_sele = "/" + c1;
+            if (c2 != "_" && c2 != " " && c2 != "") chain2_sele = "/" + c2;
+        }
+        else if (split_opt == 2 && ter_opt == 0) // align one chain from each model
+        {
+            string c1 = "", c2 = "";
+            for (i = 1; i < chainID1.size(); i++)
+                if (chainID1[i] == ',') break;
+            c1 = chainID1.substr(i + 1);
+            
+            for (i = 1; i < chainID2.size(); i++)
+                if (chainID2[i] == ',') break;
+            c2 = chainID2.substr(i + 1);
+            
+            if (c1 != "_" && c1 != " " && c1 != "") chain1_sele = "/" + c1;
+            if (c2 != "_" && c2 != " " && c2 != "") chain2_sele = "/" + c2;
+        }
+    }
+
+    /* extract aligned region and group by hinge for ChimeraX visualization */
+    int i1 = -1;
+    int i2 = -1;
+    int num_hinges = tu_vec.size(); // Total number of rigid bodies (hinges)
+    
+    // Arrays to store selections and bonds separately for each hinge
+    vector<string> resi1_sele(num_hinges, "");
+    vector<string> resi2_sele(num_hinges, "");
+    vector<string> resi1_bond(num_hinges, "");
+    vector<string> resi2_bond(num_hinges, "");
+    vector<string> prev_resi1(num_hinges, "");
+    vector<string> prev_resi2(num_hinges, "");
+    string curr_resi1;
+    string curr_resi2;
+
+    if (!mm_opt)
+    {
+        for (i = 0; i < strlen(seqM); i++)
+        {
+            i1 += (seqxA[i] != '-' && seqxA[i] != '*');
+            i2 += (seqyA[i] != '-');
+            if (seqM[i] == ' ' || seqxA[i] == '*') continue;
+            
+            curr_resi1 = resi_vec1[i1].substr(0, 4);
+            curr_resi2 = resi_vec2[i2].substr(0, 4);
+
+            // Extract hinge index from the alignment mapping (seqM)
+            char hinge_char = seqM[i];
+            int hinge_idx = 0;
+            if (hinge_char >= '0' && hinge_char <= '9') hinge_idx = hinge_char - '0';
+            else if (hinge_char >= 'a' && hinge_char <= 'z') hinge_idx = hinge_char - 'a' + 10;
+            else if (hinge_char >= 'A' && hinge_char <= 'Z') hinge_idx = hinge_char - 'A' + 36;
+            
+            // Safety check to prevent index out of bounds
+            if (hinge_idx >= num_hinges) hinge_idx = num_hinges - 1;
+
+            if (resi1_sele[hinge_idx].size() == 0)
+                resi1_sele[hinge_idx] = curr_resi1;
+            else
+            {
+                resi1_sele[hinge_idx] += "," + curr_resi1;
+                // ChimeraX syntax to explicitly draw bonds between adjacent CA/C3'
+                resi1_bond[hinge_idx] += "bond #1" + chain1_sele + ":" + prev_resi1[hinge_idx] + "@CA,C3' " +
+                                         "#1" + chain1_sele + ":" + curr_resi1 + "@CA,C3'\n";
+            }
+            
+            if (resi2_sele[hinge_idx].size() == 0)
+                resi2_sele[hinge_idx] = curr_resi2;
+            else
+            {
+                resi2_sele[hinge_idx] += "," + curr_resi2;
+                resi2_bond[hinge_idx] += "bond #2" + chain2_sele + ":" + prev_resi2[hinge_idx] + "@CA,C3' " +
+                                         "#2" + chain2_sele + ":" + curr_resi2 + "@CA,C3'\n";
+            }
+            
+            prev_resi1[hinge_idx] = curr_resi1;
+            prev_resi2[hinge_idx] = curr_resi2;
+        }
+        
+        // Finalize ChimeraX selection syntax (e.g. ":1,2,3")
+        for (int h = 0; h < num_hinges; h++)
+        {
+            if (resi1_sele[h].size()) resi1_sele[h] = ":" + resi1_sele[h];
+            if (resi2_sele[h].size()) resi2_sele[h] = ":" + resi2_sele[h];
+        }
+    }
+
+    /* write ChimeraX script (.cxc) */
+    vector<string> cxc_list;
+    cxc_list.push_back(fname_super + "");
+    cxc_list.push_back(fname_super + "_atm");
+    cxc_list.push_back(fname_super + "_all");
+    cxc_list.push_back(fname_super + "_all_atm");
+    cxc_list.push_back(fname_super + "_all_atm_lig");
+
+    // Define 34 distinct HTML/CSS standard colors supported natively by ChimeraX 
+    const char* color1_list[] = {
+        "blue", "red", "green", "yellow", "magenta", "cyan", "orange", "purple", "brown", "pink",
+        "navy", "firebrick", "forest green", "gold", "violet", "teal", "salmon", "aquamarine", "chocolate", "hot pink",
+        "lime", "olive", "slate gray", "light blue", "light green", "light yellow", "light pink", "dodger blue", "medium blue",
+        "dark violet", "crimson", "cornflower blue", "tomato", "sea green"
+    };
+    int color_palette_size = sizeof(color1_list) / sizeof(color1_list[0]);
+
+    for (int p = 0; p < cxc_list.size(); p++)
+    {
+        if (mm_opt && p <= 1) continue;
+        buf_cxc
+            << "open " << fname_super_full << "\n"
+            << "rename #1 structure1\n"
+            << "open " << yname << "\n"
+            << "rename #2 structure2\n"
+            << "hide all\n"; // Hides all ribbons, atoms, etc.
+            
+        if (p == 0) // .cxc (Main Hinge Sticks)
+        {
+            // Remove unaligned chains/atoms
+            if (chain1_sele.size())
+                buf_cxc << "delete #1 & ~(" << chain1_sele << ")\n";
+            if (chain2_sele.size())
+                buf_cxc << "delete #2 & ~(" << chain2_sele << ")\n";
+                
+            buf_cxc << "delete ~@CA & ~@C3'\n";
+            
+            // Add bonds for each hinge
+            for (int h = 0; h < num_hinges; h++) {
+                buf_cxc << resi1_bond[h] << resi2_bond[h];
+            }
+            // Show sticks for each aligned hinge region
+            for (int h = 0; h < num_hinges; h++) {
+                if (resi1_sele[h].size()) {
+                    buf_cxc << "show #1" << chain1_sele << resi1_sele[h] << " atoms\n";
+                    buf_cxc << "style #1" << chain1_sele << resi1_sele[h] << " stick\n";
+                }
+                if (resi2_sele[h].size()) {
+                    buf_cxc << "show #2" << chain2_sele << resi2_sele[h] << " atoms\n";
+                    buf_cxc << "style #2" << chain2_sele << resi2_sele[h] << " stick\n";
+                }
+            }
+        }
+        else if (p == 1) // _atm.cxc (Hinge Cartoons)
+        {
+            for (int h = 0; h < num_hinges; h++) {
+                if (resi1_sele[h].size()) buf_cxc << "cartoon #1" << chain1_sele << resi1_sele[h] << "\n";
+                if (resi2_sele[h].size()) buf_cxc << "cartoon #2" << chain2_sele << resi2_sele[h] << "\n";
+            }
+        }
+        else if (p == 2) // _all.cxc (Full Structure Cartoons)
+        {
+            buf_cxc
+                << "cartoon #1" << chain1_sele << "\n"
+                << "cartoon #2" << chain2_sele << "\n";
+        }
+        else if (p == 3) // _all_atm.cxc
+        {
+            buf_cxc
+                << "cartoon #1" << chain1_sele << "\n"
+                << "cartoon #2" << chain2_sele << "\n";
+        }
+        else if (p == 4) // _all_atm_lig.cxc (Cartoons + Ligands)
+        {
+            buf_cxc
+                << "cartoon #1\n"
+                << "cartoon #2\n"
+                << "show ~polymer atoms\n"
+                << "style ~polymer stick\n";
+        }
+        
+        // Create selection groups in ChimeraX for easy user interaction (names)
+        for (int h = 0; h < num_hinges; h++) {
+            if (resi1_sele[h].size()) buf_cxc << "name hinge_" << h << "_str1 #1" << chain1_sele << resi1_sele[h] << "\n";
+            if (resi2_sele[h].size()) buf_cxc << "name hinge_" << h << "_str2 #2" << chain2_sele << resi2_sele[h] << "\n";
+        }
+        
+        // Global color setting: Structure 1 unaligned gets light gray, Structure 2 gets solid white
+        buf_cxc
+            << "color #1 gray\n"
+            << "color #2 white\n";
+
+        // Color each hinge in Structure 1 with distinct colors
+        for (int h = 0; h < num_hinges; h++) {
+            if (resi1_sele[h].size()) {
+                buf_cxc << "color hinge_" << h << "_str1 " << color1_list[h % color_palette_size] << "\n";
+            }
+        }
+
+        // Global display styling
+        buf_cxc
+            << "size stickradius 0.3\n"
+            << "size atomradius 0.25\n"
+            << "lighting shadows false\n"
+            << "set bgColor white\n"
+            << "transparency #1,2 20\n"
+            << "view #1,2\n"
+            << endl;
+
+        fp.open((cxc_list[p] + ".cxc").c_str());
+        fp << buf_cxc.str();
+        fp.close();
+        buf_cxc.str(string());
+    }
+
+    /* clean up */
+    cxc_list.clear();
+    resi1_sele.clear();
+    resi2_sele.clear();
+    resi1_bond.clear();
+    resi2_bond.clear();
+    prev_resi1.clear();
+    prev_resi2.clear();
+    chain1_sele.clear();
+    chain2_sele.clear();
+    resi2hinge_dict.clear();
+}
+
 void output_flexalign_rasmol(const string xname, const string yname,
                              const string fname_super, const vector<vector<double> > &tu_vec,
                              double t[3], double u[3][3], const int ter_opt,
@@ -1792,19 +2284,27 @@ void output_flexalign_pymol(const string xname, const string yname,
     {
         if (split_opt == 2 && ter_opt >= 1) // align one chain from model 1
         {
-            chain1_sele = " and c. " + chainID1.substr(1);
-            chain2_sele = " and c. " + chainID2.substr(1);
+            string c1 = chainID1.substr(1);
+            string c2 = chainID2.substr(1);
+            // "''"
+            chain1_sele = " and c. " + (c1 == "_" || c1 == " " || c1 == "" ? "''" : c1);
+            chain2_sele = " and c. " + (c1 == "_" || c2 == " " || c2 == "" ? "''" : c2);
         }
         else if (split_opt == 2 && ter_opt == 0) // align one chain from each model
         {
+            string c1 = "", c2 = "";
             for (i = 1; i < chainID1.size(); i++)
                 if (chainID1[i] == ',')
                     break;
-            chain1_sele = " and c. " + chainID1.substr(i + 1);
+            c1 = chainID1.substr(i + 1);
+            
             for (i = 1; i < chainID2.size(); i++)
                 if (chainID2[i] == ',')
                     break;
-            chain2_sele = " and c. " + chainID2.substr(i + 1);
+            c2 = chainID2.substr(i + 1);
+            
+            chain1_sele = " and c. " + (c1 == "_" || c1 == " " || c1 == "" ? "''" : c1);
+            chain2_sele = " and c. " + (c1 == "_" || c2 == " " || c2 == "" ? "''" : c2);
         }
     }
 
@@ -2101,6 +2601,10 @@ void output_flexalign_results(const string xname, const string yname,
                                 t, u, ter_opt, mm_opt, split_opt, mirror_opt, seqM, seqxA, seqyA,
                                 resi_vec1, resi_vec2, chainID1, chainID2,
                                 xlen, ylen, d0A, n_ali8, rmsd, TM1, Liden);
+    else if (o_opt == 3)
+        output_flexalign_chimerax(xname, yname, fname_super, tu_vec,
+                                  t, u, ter_opt, mm_opt, split_opt, mirror_opt, seqM, seqxA, seqyA,
+                                  resi_vec1, resi_vec2, chainID1, chainID2);
 }
 
 // Data structure to hold outputs of flexalign_main to avoid parameter clutter
