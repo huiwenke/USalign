@@ -131,10 +131,10 @@ int flexalign_main(double **xa, double **ya,
                 xa_h[r1][2] = xa[i][2];
                 r1++;
             }
-            if (seqxA[r] == '-')
+            else if (seqxA[r] == '-')
             {
-                seqy_h[r2] = seqx[j];
-                secy_h[r2] = secx[j];
+                seqy_h[r2] = seqy[j];
+                secy_h[r2] = secy[j];
                 ya_h[r2][0] = ya[j][0];
                 ya_h[r2][1] = ya[j][1];
                 ya_h[r2][2] = ya[j][2];
@@ -198,10 +198,10 @@ int flexalign_main(double **xa, double **ya,
                 xa_h[r1][2] = xa[i][2];
                 r1++;
             }
-            if (seqxA[r] != '-' && seqyA[r] != '-')
+            else if (seqxA[r] != '-' && seqyA[r] != '-')
             {
-                seqy_h[r2] = seqx[j];
-                secy_h[r2] = secx[j];
+                seqy_h[r2] = seqy[j];
+                secy_h[r2] = secy[j];
                 ya_h[r2][0] = ya[j][0];
                 ya_h[r2][1] = ya[j][1];
                 ya_h[r2][2] = ya[j][2];
@@ -315,8 +315,8 @@ int flexalign_main(double **xa, double **ya,
             }
             if (seqxA[r] == '-')
             {
-                seqy_h[r2] = seqx[j];
-                secy_h[r2] = secx[j];
+                seqy_h[r2] = seqy[j];
+                secy_h[r2] = secy[j];
                 ya_h[r2][0] = ya[j][0];
                 ya_h[r2][1] = ya[j][1];
                 ya_h[r2][2] = ya[j][2];
@@ -1965,23 +1965,23 @@ void output_flexalign_rasmol(const string xname, const string yname,
     /* write rasmol script */
     if (!mm_opt)
     {
-        fp.open((fname_super).c_str());
+        fp.open((fname_super+".spt").c_str());
         fp << buf.str();
         fp.close();
     }
-    fp.open((fname_super + "_all").c_str());
+    fp.open((fname_super + "_all.spt").c_str());
     fp << buf_all.str();
     fp.close();
     if (!mm_opt)
     {
-        fp.open((fname_super + "_atm").c_str());
+        fp.open((fname_super + "_atm.spt").c_str());
         fp << buf_atm.str();
         fp.close();
     }
-    fp.open((fname_super + "_all_atm").c_str());
+    fp.open((fname_super + "_all_atm.spt").c_str());
     fp << buf_all_atm.str();
     fp.close();
-    fp.open((fname_super + "_all_atm_lig").c_str());
+    fp.open((fname_super + "_all_atm_lig.spt").c_str());
     fp << buf_all_atm_lig.str();
     fp.close();
     // fp.open((fname_super+".pdb").c_str());

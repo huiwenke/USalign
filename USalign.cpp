@@ -11,12 +11,12 @@ void print_version()
     cout << 
 "\n"
 " ********************************************************************\n"
-" * US-align (Version 20260826)                                      *\n"
+" * US-align (Version 20260908)                                      *\n"
 " * Universal Structure Alignment of Proteins and Nucleic Acids      *\n"
 " * Reference: C Zhang, L Freddolino, Y Zhang. (2026) Nat Protoc     *\n"
 " *            C Zhang, M Shine, AM Pyle, Y Zhang. (2022) Nat Methods*\n"
 " *            C Zhang, AM Pyle (2022) iScience.                     *\n"
-" * Please email comments and suggestions to zhang@zhanggroup.org    *\n"
+" * Please email comments and suggestions to zhanglab@zhanggroup.org *\n"
 " ********************************************************************"
     << endl;
 }
@@ -219,11 +219,11 @@ void print_help(bool h_opt = false)
             "\n"
             " -rasmol  Output superposed structure1 to sup.* for RasMol viewing.\n"
             "          $ USalign structure1.pdb structure2.pdb -rasmol sup\n"
-            "          $ rasmol -script sup               # C-alpha trace aligned region\n"
-            "          $ rasmol -script sup_all           # C-alpha trace whole chain\n"
-            "          $ rasmol -script sup_atm           # full-atom aligned region\n"
-            "          $ rasmol -script sup_all_atm       # full-atom whole chain\n"
-            "          $ rasmol -script sup_all_atm_lig   # full-atom with all molecules\n"
+            "          $ rasmol -script sup.spt             # C-alpha trace aligned region\n"
+            "          $ rasmol -script sup_all.spt         # C-alpha trace whole chain\n"
+            "          $ rasmol -script sup_atm.spt         # full-atom aligned region\n"
+            "          $ rasmol -script sup_all_atm.spt     # full-atom whole chain\n"
+            "          $ rasmol -script sup_all_atm_lig.spt # full-atom with all molecules\n"
             "\n"
             "-chimerax Output superposed structure1 to sup.* for ChimeraX viewing.\n"
             "          $ USalign structure1.pdb structure2.pdb -chimerax sup\n"
@@ -827,7 +827,8 @@ int MMalign(const string &xname, const string &yname,
         xlen = xlen_vec[i];
         if (xlen < 3)
         {
-            for (j=0;j<chain2_num;j++) TMave_mat[i][j]=-1;
+            for (j = 0; j < chain2_num; j++)
+                TMave_mat[i][j] = -1;
             continue;
         }
         seqx = new char[xlen + 1];
@@ -846,21 +847,21 @@ int MMalign(const string &xname, const string &yname,
             ut_mat[ut_idx][4] = 1;
             ut_mat[ut_idx][8] = 1;
 
-            if (mol_vec1[i] * mol_vec2[j] < 0) // no protein-RNA alignment
+            if (mol_vec1[i] * mol_vec2[j] < 0 && atom_opt!="PC4'") // no protein-RNA alignment unless -atom "PC4'"
             {
-                TMave_mat[i][j]=-1;
+                TMave_mat[i][j] = -1;
                 continue;
             }
             if (chainmap.size() && (!chainmap.count(i) || chainmap[i] != j))
             {
-                TMave_mat[i][j]=-1;
+                TMave_mat[i][j] = -1;
                 continue;
             }
 
             ylen = ylen_vec[j];
             if (ylen < 3)
             {
-                TMave_mat[i][j]=-1;
+                TMave_mat[i][j] = -1;
                 continue;
             }
             seqy = new char[ylen + 1];
@@ -884,7 +885,6 @@ int MMalign(const string &xname, const string &yname,
             int n_ali = 0;
             int n_ali8 = 0;
             vector<double> do_vec;
-
             int Lnorm_tmp = len_aa;
             if (mol_vec1[i] + mol_vec2[j] > 0)
                 Lnorm_tmp = len_na;
@@ -1081,7 +1081,7 @@ int MMalign(const string &xname, const string &yname,
                      seqx_vec, seqy_vec, secx_vec, secy_vec, mol_vec1, mol_vec2, xlen_vec,
                      ylen_vec, xa, ya, seqx, seqy, secx, secy, len_aa, len_na, chain1_num,
                      chain2_num, TMave_mat, seqxA_mat, seqyA_mat, assign1_list, assign2_list,
-                     sequence, d0_scale, fast_opt, chainmap, byresi_opt);
+                     sequence, d0_scale, fast_opt, chainmap, atom_opt, byresi_opt);
 
     if (byresi_opt && aln_chain_num >= 4 && is_oligomer && chainmap.size() == 0 && !se_opt) // oligomer alignment
     {
@@ -1147,7 +1147,7 @@ int MMalign(const string &xname, const string &yname,
                      secx_vec, secy_vec, mol_vec1, mol_vec2, xlen_vec, ylen_vec,
                      xa, ya, seqx, seqy, secx, secy, len_aa, len_na, chain1_num, chain2_num,
                      TMave_mat, seqxA_mat, seqyA_mat, assign1_list, assign2_list, sequence,
-                     d0_scale, fast_opt, chainmap);
+                     d0_scale, fast_opt, chainmap, atom_opt);
     }
 
     /* perform cross chain alignment
@@ -1165,7 +1165,7 @@ int MMalign(const string &xname, const string &yname,
                       secx_vec, secy_vec, mol_vec1, mol_vec2, xlen_vec, ylen_vec,
                       xa, ya, seqx, seqy, secx, secy, len_aa, len_na, chain1_num, chain2_num,
                       TMave_init, seqxA_init, seqyA_init, assign1_init, assign2_init,
-                      sequence_init, d0_scale, fast_opt);
+                      sequence_init, d0_scale, fast_opt, atom_opt);
         if (max_total_score_cross > max_total_score)
         {
             max_total_score = max_total_score_cross;
