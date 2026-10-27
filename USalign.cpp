@@ -161,6 +161,8 @@ void print_help(bool h_opt = false)
             "          5: fully non-sequential (fNS) alignment\n"
             "          6: semi-non-sequential (sNS) alignment\n"
             "          7: flexible structure alignment\n"
+            "             Supports -byresi 0 (default), 1 or 5.\n"
+            "             -byresi 1 and 5 cannot be used with -afp.\n"
             "          To use -mm 1 or -mm 2, '-ter' option must be 0 or 1.\n"
             "\n"
             "    -ter  Number of chains to align.\n"
@@ -2973,8 +2975,32 @@ int flexalign_unified(string &xname, string &yname, const string &fname_super,
                     read_PDB(PDB_lines2[chain_j], ya, seqy, resi_vec2, read_resi);
                     (mol_vec2[chain_j] > 0) ? make_sec(seqy, ya, ylen, secy, atom_opt) : make_sec(ya, ylen, secy);
 
-                    if (byresi_opt)
+                    if (byresi_opt == 5)
+                    {
+                        // Compute the full-chain glocal alignment once; all
+                        // residual fragments must reuse these fixed pairs.
+                        sequence.assign(2, "");
+                        NWalign_main(seqx, seqy, xlen, ylen, sequence[0], sequence[1],
+                            mol_vec1[chain_i] + mol_vec2[chain_j], NULL, 0, 2);
+                    }
+                    else if (byresi_opt)
                         extract_aln_from_resi(sequence, seqx, seqy, resi_vec1, resi_vec2, byresi_opt);
+
+                    if (byresi_opt)
+                    {
+                        vector<int> fixed_invmap;
+                        if (!flexalign_fixed_invmap(sequence, xlen, ylen, fixed_invmap))
+                        {
+                            cerr << "Warning! No fixed residue pairs between "
+                                 << xname << chainID_list1[chain_i] << " and "
+                                 << yname << chainID_list2[chain_j] << endl;
+                            DeleteArray(&ya, ylen);
+                            delete[] seqy;
+                            delete[] secy;
+                            resi_vec2.clear();
+                            continue;
+                        }
+                    }
 
                     // --- CORE DISPATCH LOGIC START ---
                     if (mode == FLEX_USBCAT)
@@ -3651,8 +3677,8 @@ int main(int argc, char *argv[])
         // if (cp_opt) PrintErrorAndQuit("-mm cannot be used with -cp");
         if (dir_opt.size() && mm_opt == 2)
             PrintErrorAndQuit("-mm 2 cannot be used with -dir");
-        if (byresi_opt)
-            PrintErrorAndQuit("-mm cannot be used with -byresi");
+        if (byresi_opt && !(mm_opt == 7 && (byresi_opt == 1 || byresi_opt == 5)))
+            PrintErrorAndQuit("-mm cannot be used with -byresi (except -mm 7 with -byresi 1 or 5)");
         if (ter_opt >= 2 && (mm_opt == 1 || mm_opt == 2))
             PrintErrorAndQuit("-mm 1 or 2 must be used with -ter 0 or -ter 1");
         if (mm_opt == 4 && (yname.size() || dir2_opt.size()))
@@ -3687,6 +3713,8 @@ int main(int argc, char *argv[])
 
     if (usbcat_opt && mm_opt != 7)
         PrintErrorAndQuit("ERROR! -afp parameter can only be used when -mm 7 is set");
+    if (usbcat_opt && byresi_opt)
+        PrintErrorAndQuit("ERROR! -afp cannot be used with -byresi 1 or 5");
 
     if (chainmapfile.size() && mm_opt != 1)
         PrintErrorAndQuit("ERROR! -chainmap must be used with -mm 1");
